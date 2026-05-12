@@ -1,0 +1,4 @@
+start_utc,end_utc,reason,symbols
+# 下面是範例；要啟用就刪掉行首的 #。
+# 2026-05-13T12:00:00Z,2026-05-13T15:00:00Z,US CPI,*
+# 2026-06-10T17:00:00Z,2026-06-10T21:00:00Z,FOMC Rate Decision,"SPY,QQQ"

@@ -1,0 +1,58 @@
+name: Alpaca FMP Swing Trader
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions schedule uses UTC. Avoid :00 because GitHub documents higher load there.
+    - cron: "17 * * * *"
+
+concurrency:
+  group: alpaca-fmp-swing-trader
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run swing trader
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+          PAPER: ${{ vars.PAPER || 'true' }}
+          ENABLE_TRADING: ${{ vars.ENABLE_TRADING || 'false' }}
+          WATCHLIST: ${{ vars.WATCHLIST || 'SPY' }}
+          STRATEGY: ${{ vars.STRATEGY || 'disabled' }}
+          DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
+
+          RISK_FRACTION: ${{ vars.RISK_FRACTION || '0.01' }}
+          REWARD_RISK_RATIO: ${{ vars.REWARD_RISK_RATIO || '2.0' }}
+          STOP_LOSS_PCT: ${{ vars.STOP_LOSS_PCT || '0.05' }}
+          ALLOW_FRACTIONAL: ${{ vars.ALLOW_FRACTIONAL || 'false' }}
+          MAX_POSITION_COUNT: ${{ vars.MAX_POSITION_COUNT || '1' }}
+
+          EARNINGS_BLOCK_DAYS_BEFORE: ${{ vars.EARNINGS_BLOCK_DAYS_BEFORE || '1' }}
+          EARNINGS_BLOCK_DAYS_AFTER: ${{ vars.EARNINGS_BLOCK_DAYS_AFTER || '1' }}
+          MANUAL_BLACKOUT_FILE: ${{ vars.MANUAL_BLACKOUT_FILE || 'config/manual_blackout_events.csv' }}
+
+          SMA_FAST: ${{ vars.SMA_FAST || '20' }}
+          SMA_SLOW: ${{ vars.SMA_SLOW || '50' }}
+          HISTORICAL_LOOKBACK_DAYS: ${{ vars.HISTORICAL_LOOKBACK_DAYS || '180' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+        run: python src/swing_trader.py
