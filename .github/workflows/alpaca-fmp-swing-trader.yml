@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions schedule uses UTC. Avoid :00 because GitHub documents higher load there.
-    - cron: "17 * * * *"
+    - cron: "*/5 * * * *"
 
 concurrency:
   group: alpaca-fmp-swing-trader
