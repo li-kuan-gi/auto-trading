@@ -1,0 +1,17 @@
+name = "auto-trading-scheduler"
+main = "worker.js"
+compatibility_date = "2026-05-17"
+workers_dev = false
+
+[triggers]
+# Cloudflare Cron Triggers use UTC.
+# This runs every 15 minutes on weekdays across the broad US market window.
+# The trading workflow still checks the Alpaca market clock before doing work.
+crons = [ "*/15 13-22 * * 1-5" ]
+
+[vars]
+GITHUB_OWNER = "li-kuan-gi"
+GITHUB_REPO = "auto-trading"
+GITHUB_WORKFLOW_FILE = "alpaca-fmp-swing-trader.yml"
+GITHUB_REF = "main"
+GITHUB_API_VERSION = "2026-03-10"

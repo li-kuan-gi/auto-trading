@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.dev.vars
+node_modules/
+cloudflare/.wrangler/

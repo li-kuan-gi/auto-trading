@@ -92,6 +92,62 @@ fine-grained token 需要這個 repo 的 `Actions: write` 權限。GitHub 文件
 gh workflow run alpaca-fmp-swing-trader.yml --ref main
 ```
 
+### 3.3 Cloudflare Workers Cron
+
+這個 repo 已附一個 Cloudflare Worker：
+
+```text
+cloudflare/worker.js
+cloudflare/wrangler.toml
+```
+
+這個 Worker 是 scheduled-only，`workers_dev = false`，不需要公開 `*.workers.dev` URL。
+
+預設排程在 `cloudflare/wrangler.toml`：
+
+```toml
+crons = [ "*/15 13-22 * * 1-5" ]
+```
+
+Cloudflare Cron Triggers 使用 UTC。這個設定會在週一到週五、13:00-22:59 UTC 每 15 分鐘觸發一次，涵蓋美股開盤附近的夏令/冬令時間差；實際是否交易仍由 GitHub workflow 裡的 Alpaca market clock 檢查決定。若你想降低 GitHub Actions 次數，可以改成例如每 30 分鐘：
+
+```toml
+crons = [ "*/30 13-22 * * 1-5" ]
+```
+
+部署步驟：
+
+1. 到 GitHub 建立 fine-grained personal access token，repo 選 `li-kuan-gi/auto-trading`，權限給 `Actions: Read and write`。
+2. 登入 Cloudflare：
+
+```bash
+cd cloudflare
+npx wrangler@latest login
+```
+
+3. 把 GitHub token 存成 Cloudflare Worker secret：
+
+```bash
+npx wrangler@latest secret put GITHUB_TOKEN
+```
+
+4. 部署 Worker 與 Cron Trigger：
+
+```bash
+npx wrangler@latest deploy
+```
+
+5. 端到端測試 scheduled handler：
+
+```bash
+npx wrangler@latest dev --remote --test-scheduled
+curl "http://localhost:8787/__scheduled"
+```
+
+這會使用 Cloudflare 上的 Worker secret。若改成本機模式測試，才需要用 `.dev.vars` 放本機 secret；`.dev.vars` 已放進 `.gitignore`，不要 commit。
+
+Cloudflare 免費方案目前有 Workers 100,000 requests/day，Cron Triggers 免費帳號最多 5 個；這個設定只用 1 個 trigger。Cloudflare 官方頁面也標示可以免費開始且不需要信用卡：<https://www.cloudflare.com/plans/>
+
 ---
 
 ## 4. 怎麼開始測試
