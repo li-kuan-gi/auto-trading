@@ -1,13 +1,15 @@
 # Alpaca + FMP Swing Trader Guard
 
-這是一個「每小時檢查一次，但不會每小時亂下單」的 Alpaca paper trading 範例。
+這是一個「被觸發時檢查一次，通過 guards 才可能下單」的 Alpaca paper trading 範例。
+
+排程不由程式碼或 GitHub Actions `schedule` 處理。若要定時執行，請用外部服務呼叫 GitHub Actions workflow dispatch API；也可以自己到 GitHub Actions 頁面手動觸發。
 
 目前版本的事件避險方式：
 
 1. **FMP Earnings Calendar**：避開個股財報日前後。
 2. **手動 blackout CSV**：先手動填 CPI、FOMC、NFP 等總經事件，避免因 FMP economic calendar 權限不足而失敗。
 3. **最多一個持倉**：只要帳戶已有任何 open position，就不會開新倉。
-4. **已有 open order 也不開新倉**：避免 GitHub Actions 每小時重複送單。
+4. **已有 open order 也不開新倉**：避免外部服務或手動重複觸發時重複送單。
 5. **風險定義下單**：用 `帳戶 equity × RISK_FRACTION ÷ 每股風險` 計算 qty。
 6. **Bracket order**：進場時同時帶 take-profit 與 stop-loss。
 
@@ -53,15 +55,42 @@ DATA_FEED=iex
 
 ---
 
-## 3. 每小時排程
+## 3. 觸發方式
 
-workflow 使用：
+workflow 只保留手動觸發：
 
 ```yaml
-- cron: "17 * * * *"
+on:
+  workflow_dispatch:
 ```
 
-GitHub Actions 的 schedule 是 UTC。選 17 分是為了避開整點高峰。
+這個 repo 不依賴 GitHub Actions `schedule`，也不在 `src/swing_trader.py` 裡做長駐輪詢。
+
+### 3.1 手動觸發
+
+到 GitHub repo 的 Actions 頁面，選 `Alpaca FMP Swing Trader`，按 `Run workflow`。
+
+### 3.2 外部服務呼叫 API
+
+外部排程服務只需要在你想檢查交易的時間呼叫 GitHub workflow dispatch API。Token 請放在外部服務的 secret / credential manager，不要寫進 repo。
+
+```bash
+curl -L \
+  -X POST \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer <YOUR_GITHUB_TOKEN>" \
+  -H "X-GitHub-Api-Version: 2026-03-10" \
+  https://api.github.com/repos/li-kuan-gi/auto-trading/actions/workflows/alpaca-fmp-swing-trader.yml/dispatches \
+  -d '{"ref":"main","return_run_details":true}'
+```
+
+fine-grained token 需要這個 repo 的 `Actions: write` 權限。GitHub 文件：<https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event>
+
+也可以用 GitHub CLI：
+
+```bash
+gh workflow run alpaca-fmp-swing-trader.yml --ref main
+```
 
 ---
 
@@ -82,7 +111,7 @@ python src/swing_trader.py
 
 ### 4.2 GitHub Actions 手動測試
 
-到 GitHub repo 的 Actions 頁面，選 `Alpaca FMP Swing Trader`，按 `Run workflow`。
+照「3.1 手動觸發」執行 workflow。
 
 ---
 
@@ -175,13 +204,25 @@ config/manual_blackout_events.csv
 
 ```csv
 start_utc,end_utc,reason,symbols
-2026-05-13T12:00:00Z,2026-05-13T15:00:00Z,US CPI,*
+2026-06-10T12:00:00Z,2026-06-10T15:00:00Z,US CPI,*
+2026-06-17T17:30:00Z,2026-06-17T20:30:00Z,FOMC Rate Decision,*
 ```
 
 `symbols`：
 
 - `*`：全部標的都避開
 - `"SPY,QQQ"`：只避開這些 symbols（CSV 內有逗號時要加雙引號）
+
+目前已先預填 2026-05-28 到 2026-12-23 的常見美國總經事件，包括 CPI、PPI、Employment Situation / NFP、FOMC、GDP / PCE。時間一律寫 UTC：
+
+- 08:30 ET 發布的資料，預設 blackout 為發布前 30 分鐘到發布後 2.5 小時。
+- FOMC 預設覆蓋 14:00 ET statement 與 14:30 ET press conference。
+
+這份 CSV 是手動維護的 guardrail。上線交易前，請依官方行事曆核對最新日期與時間：
+
+- BLS release calendar: <https://www.bls.gov/schedule/2026/home.htm>
+- Federal Reserve FOMC calendar: <https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm>
+- BEA release schedule: <https://www.bea.gov/news/schedule/full>
 
 ---
 
