@@ -106,13 +106,17 @@ cloudflare/wrangler.toml
 預設排程在 `cloudflare/wrangler.toml`：
 
 ```toml
-crons = [ "*/15 13-22 * * 1-5" ]
+crons = [ "*/15 13-22 * * mon-fri" ]
 ```
 
-Cloudflare Cron Triggers 使用 UTC。這個設定會在週一到週五、13:00-22:59 UTC 每 15 分鐘觸發一次，涵蓋美股開盤附近的夏令/冬令時間差；實際是否交易仍由 GitHub workflow 裡的 Alpaca market clock 檢查決定。若你想降低 GitHub Actions 次數，可以改成例如每 30 分鐘：
+Cloudflare Cron Triggers 使用 UTC。這個設定會在週一到週五、13:00-22:59 UTC 每 15 分鐘觸發一次，涵蓋美股開盤附近的夏令/冬令時間差；實際是否交易仍由 GitHub workflow 裡的 Alpaca market clock 檢查決定。
+
+Cloudflare 的 weekday 數字是 `1 = Sunday` 到 `7 = Saturday`，和部分 crontab 不同。為了避免誤解，這裡刻意使用 `mon-fri`，不要改成 `1-5`。
+
+若你想降低 GitHub Actions 次數，可以改成例如每 30 分鐘：
 
 ```toml
-crons = [ "*/30 13-22 * * 1-5" ]
+crons = [ "*/30 13-22 * * mon-fri" ]
 ```
 
 部署步驟：

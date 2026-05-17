@@ -7,7 +7,7 @@ workers_dev = false
 # Cloudflare Cron Triggers use UTC.
 # This runs every 15 minutes on weekdays across the broad US market window.
 # The trading workflow still checks the Alpaca market clock before doing work.
-crons = [ "*/15 13-22 * * 1-5" ]
+crons = [ "*/15 13-22 * * mon-fri" ]
 
 [vars]
 GITHUB_OWNER = "li-kuan-gi"
