@@ -36,6 +36,7 @@ jobs:
           ENABLE_TRADING: ${{ vars.ENABLE_TRADING || 'false' }}
           WATCHLIST: ${{ vars.WATCHLIST || 'SPY' }}
           STRATEGY: ${{ vars.STRATEGY || 'disabled' }}
+          SYMBOL_SELECTION_METHOD: ${{ vars.SYMBOL_SELECTION_METHOD || 'best_signal' }}
           DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
 
           RISK_FRACTION: ${{ vars.RISK_FRACTION || '0.01' }}

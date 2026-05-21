@@ -48,6 +48,7 @@ ENABLE_TRADING=false
 PAPER=true
 WATCHLIST=SPY
 STRATEGY=disabled
+SYMBOL_SELECTION_METHOD=best_signal
 DATA_FEED=iex
 ```
 
@@ -184,6 +185,15 @@ python src/swing_trader.py
 - positions / open orders 檢查
 - FMP earnings calendar 檢查
 - manual blackout 檢查
+
+如果還沒有任何持倉，也沒有 open order，程式會從 `WATCHLIST` 依策略分數選出交易標的。範例：
+
+```text
+WATCHLIST=AAPL,SPY
+SYMBOL_SELECTION_METHOD=best_signal
+```
+
+`best_signal` 會檢查所有候選標的，排除不可交易、被事件 blackout、或策略沒有 signal 的標的，再選策略分數最高者。`sma_trend` 的分數目前由趨勢強度與突破強度組成，log 會輸出 `SYMBOL_CANDIDATE`、`SYMBOL_RANKING` 與 `SELECTED_SYMBOL` 方便檢查。若改成 `first_signal`，才會照 `WATCHLIST` 順序選第一個符合條件的標的。
 
 若要測試完整下單流程，可以先設：
 

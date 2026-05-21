@@ -83,6 +83,7 @@ class Settings:
 
     watchlist: list[str]
     strategy: str
+    symbol_selection_method: str
     data_feed: str
 
     risk_fraction: Decimal
@@ -118,6 +119,7 @@ def load_settings() -> Settings:
         enable_trading=env_bool("ENABLE_TRADING", False),
         watchlist=parse_watchlist(env_str("WATCHLIST", "SPY")),
         strategy=env_str("STRATEGY", "disabled").lower(),
+        symbol_selection_method=env_str("SYMBOL_SELECTION_METHOD", "best_signal").lower(),
         data_feed=env_str("DATA_FEED", "iex").lower(),
         risk_fraction=env_decimal("RISK_FRACTION", "0.01"),
         reward_risk_ratio=env_decimal("REWARD_RISK_RATIO", "2.0"),
@@ -145,6 +147,8 @@ def load_settings() -> Settings:
 
     if s.strategy not in {"disabled", "manual_once", "sma_trend"}:
         raise ValueError("STRATEGY must be one of: disabled, manual_once, sma_trend")
+    if s.symbol_selection_method not in {"best_signal", "first_signal"}:
+        raise ValueError("SYMBOL_SELECTION_METHOD must be one of: best_signal, first_signal")
     if s.risk_fraction <= 0 or s.risk_fraction > Decimal("0.10"):
         raise ValueError("RISK_FRACTION must be > 0 and <= 0.10")
     if s.reward_risk_ratio <= 0:
@@ -456,6 +460,8 @@ class TradeSignal:
     reference_price: Decimal
     stop_price: Decimal
     take_profit_price: Decimal
+    selection_score: Decimal
+    selection_details: dict[str, Any]
 
 
 def compute_sma(values: list[Decimal], period: int) -> Decimal:
@@ -507,6 +513,8 @@ def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> O
             reference_price=round_price(ref),
             stop_price=stop,
             take_profit_price=take,
+            selection_score=Decimal("0"),
+            selection_details={"strategy": "manual_once"},
         )
 
     if strategy == "sma_trend":
@@ -529,6 +537,9 @@ def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> O
         prev_fast = compute_sma(closes[:-1], settings.sma_fast)
 
         signal = latest_fast > latest_slow and latest_close > latest_fast and prev_close <= prev_fast
+        trend_strength = (latest_fast / latest_slow) - Decimal("1")
+        breakout_strength = (latest_close / latest_fast) - Decimal("1")
+        selection_score = trend_strength + breakout_strength
 
         json_log("SMA_STATUS", {
             "symbol": symbol,
@@ -537,6 +548,9 @@ def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> O
             "latest_fast": latest_fast,
             "latest_slow": latest_slow,
             "prev_fast": prev_fast,
+            "trend_strength": trend_strength,
+            "breakout_strength": breakout_strength,
+            "selection_score": selection_score,
             "signal": signal,
         })
 
@@ -553,6 +567,15 @@ def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> O
             reference_price=round_price(ref),
             stop_price=stop,
             take_profit_price=take,
+            selection_score=selection_score,
+            selection_details={
+                "strategy": "sma_trend",
+                "latest_close": latest_close,
+                "latest_fast": latest_fast,
+                "latest_slow": latest_slow,
+                "trend_strength": trend_strength,
+                "breakout_strength": breakout_strength,
+            },
         )
 
     raise ValueError(f"Unsupported strategy: {strategy}")
@@ -612,6 +635,73 @@ def ensure_asset_tradeable(client: AlpacaRestClient, symbol: str) -> bool:
     return bool(asset.get("tradable")) and asset.get("status") == "active"
 
 
+def select_trade_signal(
+    settings: Settings,
+    client: AlpacaRestClient,
+    current_time: datetime,
+    blocks: list[BlockReason],
+) -> Optional[TradeSignal]:
+    json_log("SYMBOL_SELECTION", {
+        "method": settings.symbol_selection_method,
+        "watchlist": settings.watchlist,
+        "strategy": settings.strategy,
+    })
+
+    candidates: list[TradeSignal] = []
+
+    for symbol in settings.watchlist:
+        if not ensure_asset_tradeable(client, symbol):
+            logging.info("SKIP_SYMBOL not tradable: %s", symbol)
+            continue
+
+        active_block = find_active_block(current_time, symbol, blocks)
+        if active_block:
+            json_log("NO_TRADE blocked_by_event", {"symbol": symbol, **active_block.to_dict()})
+            continue
+
+        signal = build_signal(settings, client, symbol)
+        if signal is None:
+            logging.info("NO_SIGNAL symbol=%s strategy=%s", symbol, settings.strategy)
+            continue
+
+        json_log("SYMBOL_CANDIDATE", dataclasses.asdict(signal))
+        candidates.append(signal)
+
+        if settings.symbol_selection_method == "first_signal":
+            json_log("SELECTED_SYMBOL", {
+                "symbol": signal.symbol,
+                "reason": signal.reason,
+                "selection_method": settings.symbol_selection_method,
+                "selection_score": signal.selection_score,
+            })
+            return signal
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda s: s.selection_score)
+    if settings.symbol_selection_method == "best_signal" and settings.strategy == "manual_once":
+        logging.info("SYMBOL_SELECTION manual_once has no ranking signal; selection follows WATCHLIST order")
+        best = candidates[0]
+
+    json_log("SYMBOL_RANKING", [
+        {
+            "symbol": candidate.symbol,
+            "selection_score": candidate.selection_score,
+            "reason": candidate.reason,
+        }
+        for candidate in sorted(candidates, key=lambda s: s.selection_score, reverse=True)
+    ])
+
+    json_log("SELECTED_SYMBOL", {
+        "symbol": best.symbol,
+        "reason": best.reason,
+        "selection_method": settings.symbol_selection_method,
+        "selection_score": best.selection_score,
+    })
+    return best
+
+
 def summarize_orders(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summary = []
     for o in orders:
@@ -646,10 +736,11 @@ def run() -> int:
     setup_logging(settings.log_level)
 
     logging.info(
-        "START paper=%s enable_trading=%s strategy=%s watchlist=%s feed=%s",
+        "START paper=%s enable_trading=%s strategy=%s symbol_selection_method=%s watchlist=%s feed=%s",
         settings.paper,
         settings.enable_trading,
         settings.strategy,
+        settings.symbol_selection_method,
         settings.watchlist,
         settings.data_feed,
     )
@@ -706,34 +797,21 @@ def run() -> int:
     if blocks:
         json_log("BLACKOUT_WINDOWS", [b.to_dict() for b in blocks])
 
-    for symbol in settings.watchlist:
-        if not ensure_asset_tradeable(alpaca, symbol):
-            logging.info("SKIP_SYMBOL not tradable: %s", symbol)
-            continue
-
-        active_block = find_active_block(current_time, symbol, blocks)
-        if active_block:
-            json_log("NO_TRADE blocked_by_event", {"symbol": symbol, **active_block.to_dict()})
-            continue
-
-        signal = build_signal(settings, alpaca, symbol)
-        if signal is None:
-            logging.info("NO_SIGNAL symbol=%s strategy=%s", symbol, settings.strategy)
-            continue
-
-        order_payload = build_bracket_order(settings, account, signal)
-        json_log("SIGNAL", dataclasses.asdict(signal))
-        json_log("ORDER_PAYLOAD", order_payload)
-
-        if not settings.enable_trading:
-            logging.info("DRY_RUN enable_trading=false; order was NOT submitted")
-            return 0
-
-        submitted = alpaca.submit_order(order_payload)
-        json_log("ORDER_SUBMITTED", submitted)
+    signal = select_trade_signal(settings, alpaca, current_time, blocks)
+    if signal is None:
+        logging.info("END no eligible trade")
         return 0
 
-    logging.info("END no eligible trade")
+    order_payload = build_bracket_order(settings, account, signal)
+    json_log("SIGNAL", dataclasses.asdict(signal))
+    json_log("ORDER_PAYLOAD", order_payload)
+
+    if not settings.enable_trading:
+        logging.info("DRY_RUN enable_trading=false; order was NOT submitted")
+        return 0
+
+    submitted = alpaca.submit_order(order_payload)
+    json_log("ORDER_SUBMITTED", submitted)
     return 0
 
 
