@@ -215,6 +215,13 @@ def json_log(label: str, payload: Any) -> None:
     logging.info("%s %s", label, json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True))
 
 
+class _HttpError(RuntimeError):
+    """RuntimeError subclass that carries the HTTP status code as a structured attribute."""
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class AlpacaRestClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -240,33 +247,35 @@ class AlpacaRestClient:
         resp = self.session.request(method, url, params=params, json=json_body, timeout=timeout)
         if resp.status_code >= 400:
             body = resp.text[:1000]
-            raise RuntimeError(f"{method} {url} failed: HTTP {resp.status_code}: {body}")
+            raise _HttpError(resp.status_code, f"{method} {url} failed: HTTP {resp.status_code}: {body}")
         if not resp.text:
             return None
         return resp.json()
 
     def get_account(self) -> dict[str, Any]:
-        return self._request("GET", self.settings.trading_base, "/v2/account")
+        return self._request("GET", self.settings.trading_base, "/v2/account") or {}
 
     def get_clock(self) -> dict[str, Any]:
-        return self._request("GET", self.settings.trading_base, "/v2/clock")
+        return self._request("GET", self.settings.trading_base, "/v2/clock") or {}
 
     def get_positions(self) -> list[dict[str, Any]]:
-        return self._request("GET", self.settings.trading_base, "/v2/positions")
+        data = self._request("GET", self.settings.trading_base, "/v2/positions")
+        return data if isinstance(data, list) else []
 
     def get_open_orders(self) -> list[dict[str, Any]]:
-        return self._request(
+        data = self._request(
             "GET",
             self.settings.trading_base,
             "/v2/orders",
             params={"status": "open", "nested": "true", "limit": 100},
         )
+        return data if isinstance(data, list) else []
 
     def get_asset(self, symbol: str) -> dict[str, Any]:
-        return self._request("GET", self.settings.trading_base, f"/v2/assets/{symbol}")
+        return self._request("GET", self.settings.trading_base, f"/v2/assets/{symbol}") or {}
 
     def submit_order(self, order_payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("POST", self.settings.trading_base, "/v2/orders", json_body=order_payload)
+        return self._request("POST", self.settings.trading_base, "/v2/orders", json_body=order_payload) or {}
 
     def get_historical_daily_bars(self, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
         data = self._request(
@@ -283,6 +292,8 @@ class AlpacaRestClient:
                 "limit": 1000,
             },
         )
+        if data is None:
+            return []
         bars_by_symbol = data.get("bars", {})
         if isinstance(bars_by_symbol, dict):
             return bars_by_symbol.get(symbol, []) or []
@@ -295,6 +306,8 @@ class AlpacaRestClient:
             "/v2/stocks/quotes/latest",
             params={"symbols": symbol, "feed": self.settings.data_feed},
         )
+        if data is None:
+            return None
         quotes = data.get("quotes", {})
         return quotes.get(symbol)
 
@@ -305,8 +318,20 @@ class AlpacaRestClient:
             "/v2/stocks/bars/latest",
             params={"symbols": symbol, "feed": self.settings.data_feed},
         )
+        if data is None:
+            return None
         bars = data.get("bars", {})
         return bars.get(symbol)
+
+    def close_position(self, symbol: str, *, cancel_orders: bool = False) -> Optional[dict[str, Any]]:
+        """Close (liquidate) the position for *symbol* via a market order.
+
+        When cancel_orders=True, Alpaca atomically cancels any associated open orders
+        (bracket TP/SL legs) server-side before closing, eliminating the race window
+        that would exist if orders were cancelled in a separate prior API call.
+        """
+        params: dict[str, Any] = {"cancel_orders": "true"} if cancel_orders else None
+        return self._request("DELETE", self.settings.trading_base, f"/v2/positions/{symbol}", params=params)
 
 
 class FmpClient:
@@ -322,7 +347,9 @@ class FmpClient:
             "apikey": self.settings.fmp_api_key,
         }
         resp = self.session.get(url, params=params, timeout=30)
-        if resp.status_code in {401, 402, 403, 404}:
+        if resp.status_code in {401, 403}:
+            raise _HttpError(resp.status_code, f"FMP earnings-calendar auth failed: HTTP {resp.status_code}: {resp.text[:500]}")
+        if resp.status_code in {402, 404}:
             logging.warning("FMP earnings-calendar unavailable: HTTP %s: %s", resp.status_code, resp.text[:500])
             return []
         if resp.status_code >= 400:
@@ -581,6 +608,68 @@ def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> O
     raise ValueError(f"Unsupported strategy: {strategy}")
 
 
+@dataclass(frozen=True)
+class ExitSignal:
+    symbol: str
+    reason: str
+
+
+def build_exit_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> Optional[ExitSignal]:
+    """Return an ExitSignal when the strategy says the existing position should be closed.
+
+    This is separate from stop-loss / take-profit (those are handled by Alpaca bracket legs).
+    This fires on trend-reversal logic so the position can be exited *before* SL/TP is hit.
+    """
+    strategy = settings.strategy
+
+    if strategy in {"disabled", "manual_once"}:
+        # manual_once has no reversal concept; let the bracket order manage exit.
+        return None
+
+    if strategy == "sma_trend":
+        # Use end = yesterday so closes[-1] is a confirmed daily close, not today's
+        # partial in-progress bar whose 'c' field is the last traded price mid-session.
+        end = now_utc().date() - timedelta(days=1)
+        start = end - timedelta(days=settings.historical_lookback_days)
+        bars = client.get_historical_daily_bars(symbol, start, end)
+        if len(bars) < settings.sma_slow + 2:
+            logging.info("NO_EXIT_SIGNAL not enough bars for %s: got=%s need=%s", symbol, len(bars), settings.sma_slow + 2)
+            return None
+
+        closes = [d(b["c"]) for b in bars if "c" in b]
+        if len(closes) < settings.sma_slow + 2:
+            logging.info("NO_EXIT_SIGNAL not enough close values for %s", symbol)
+            return None
+
+        latest_close = closes[-1]
+        latest_fast = compute_sma(closes, settings.sma_fast)
+        latest_slow = compute_sma(closes, settings.sma_slow)
+
+        death_cross = latest_fast < latest_slow
+        price_below_slow = latest_close < latest_slow
+
+        json_log("SMA_EXIT_STATUS", {
+            "symbol": symbol,
+            "latest_close": latest_close,
+            "latest_fast": latest_fast,
+            "latest_slow": latest_slow,
+            "death_cross": death_cross,
+            "price_below_slow": price_below_slow,
+        })
+
+        if death_cross or price_below_slow:
+            reasons: list[str] = []
+            if death_cross:
+                reasons.append(f"fast_sma({settings.sma_fast}) < slow_sma({settings.sma_slow}) (death cross)")
+            if price_below_slow:
+                reasons.append(f"close({latest_close}) < slow_sma({settings.sma_slow})({latest_slow})")
+            return ExitSignal(symbol=symbol, reason=" AND ".join(reasons))
+
+        return None
+
+    raise ValueError(f"Unsupported strategy: {strategy}")
+
+
 def calculate_qty(account: dict[str, Any], signal: TradeSignal, settings: Settings) -> Decimal:
     equity = d(account.get("equity"))
     if equity <= 0:
@@ -774,9 +863,68 @@ def run() -> int:
         logging.info("NO_TRADE market is closed")
         return 0
 
-    if len(positions) >= settings.max_position_count:
-        logging.info("NO_TRADE already has position(s); max_position_count=%s", settings.max_position_count)
+    # --- Exit-signal check: runs even if bracket legs are still open ---
+    if positions:
+        for pos in positions:
+            pos_symbol = str(pos.get("symbol", "")).upper()
+            if not pos_symbol.strip():
+                # Guard: Alpaca position missing symbol — skip to avoid hitting the
+                # close-all-positions endpoint (DELETE /v2/positions/ with empty path).
+                logging.warning("SKIP_POSITION position object has no symbol field: %s", pos)
+                continue
+
+            try:
+                exit_sig = build_exit_signal(settings, alpaca, pos_symbol)
+            except _HttpError as exc:
+                if exc.status_code in (401, 403):
+                    raise  # auth failure — hard stop, do not silently skip
+                logging.warning("EXIT_SIGNAL_ERROR symbol=%s error=%s; skipping exit check", pos_symbol, exc)
+                continue
+            except (requests.exceptions.RequestException, ValueError) as exc:
+                logging.warning("EXIT_SIGNAL_ERROR symbol=%s error=%s; skipping exit check", pos_symbol, exc)
+                continue
+            if exit_sig is not None:
+                json_log("EXIT_SIGNAL", {"symbol": pos_symbol, "reason": exit_sig.reason})
+                if settings.enable_trading:
+                    try:
+                        # cancel_orders=True makes Alpaca atomically cancel the bracket
+                        # TP/SL legs and close the position in one server-side operation,
+                        # eliminating the race window of a separate cancel-then-close.
+                        closed = alpaca.close_position(pos_symbol, cancel_orders=True)
+                        json_log("POSITION_CLOSED", closed if closed is not None else {"symbol": pos_symbol})
+                    except _HttpError as exc:
+                        if exc.status_code in (401, 403):
+                            raise  # auth failure — hard stop
+                        if exc.status_code in (404, 422):
+                            # 404 = position already closed by a bracket fill that beat us;
+                            # 422 = position already in the process of closing.
+                            logging.warning(
+                                "CLOSE_POSITION_FAILED symbol=%s error=%s; "
+                                "position likely already closed by bracket order",
+                                pos_symbol, exc,
+                            )
+                        else:
+                            # 429 / 5xx = transient — log and continue, retry next run
+                            logging.warning(
+                                "CLOSE_POSITION_FAILED symbol=%s error=%s; "
+                                "position left open, will retry next run",
+                                pos_symbol, exc,
+                            )
+                    except requests.exceptions.RequestException as exc:
+                        logging.warning("CLOSE_POSITION_NETWORK_ERROR symbol=%s error=%s; position left open, will retry next run", pos_symbol, exc)
+                else:
+                    logging.info(
+                        "DRY_RUN exit signal fired for %s but enable_trading=false; position NOT closed",
+                        pos_symbol,
+                    )
+            else:
+                logging.info(
+                    "HOLD position=%s no exit signal; bracket order continues to manage SL/TP",
+                    pos_symbol,
+                )
+        logging.info("NO_NEW_ENTRY already has %d position(s)", len(positions))
         return 0
+    # --- End exit-signal check ---
 
     if open_orders:
         logging.info("NO_TRADE already has open order(s)")
@@ -784,7 +932,16 @@ def run() -> int:
 
     query_start = current_time.date() - timedelta(days=max(settings.earnings_block_days_before, 1))
     query_end = current_time.date() + timedelta(days=max(settings.earnings_block_days_after, 7))
-    earnings = fmp.get_earnings_calendar(query_start, query_end)
+    try:
+        earnings = fmp.get_earnings_calendar(query_start, query_end)
+    except _HttpError as exc:
+        if exc.status_code in (401, 403):
+            raise  # auth failure — propagate to __main__ for exit 1
+        logging.error("EARNINGS_CALENDAR_FAILED error=%s; halting this run to preserve earnings blackout", exc)
+        return 0
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        logging.error("EARNINGS_CALENDAR_FAILED error=%s; halting this run to preserve earnings blackout", exc)
+        return 0
     earnings_blocks = earnings_events_to_blackouts(
         earnings,
         settings.watchlist,
@@ -816,4 +973,10 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    try:
+        raise SystemExit(run())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        logging.error("FATAL %s: %s", type(exc).__name__, exc)
+        raise SystemExit(1) from exc
