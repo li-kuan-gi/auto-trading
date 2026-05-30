@@ -1,0 +1,79 @@
+name: Alpaca Strategy Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Backtest start date, YYYY-MM-DD"
+        required: true
+        default: "2025-01-01"
+      end:
+        description: "Backtest end date, YYYY-MM-DD"
+        required: true
+        default: "2025-12-31"
+      watchlist:
+        description: "Comma-separated symbols"
+        required: true
+        default: "SPY"
+      initial_equity:
+        description: "Starting equity"
+        required: true
+        default: "10000"
+      output_json:
+        description: "Print full JSON result"
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: alpaca-strategy-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backtest
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          PAPER: ${{ vars.PAPER || 'true' }}
+          DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
+          RISK_FRACTION: ${{ vars.RISK_FRACTION || '0.01' }}
+          REWARD_RISK_RATIO: ${{ vars.REWARD_RISK_RATIO || '2.0' }}
+          STOP_LOSS_PCT: ${{ vars.STOP_LOSS_PCT || '0.05' }}
+          ALLOW_FRACTIONAL: ${{ vars.ALLOW_FRACTIONAL || 'false' }}
+          SMA_FAST: ${{ vars.SMA_FAST || '20' }}
+          SMA_SLOW: ${{ vars.SMA_SLOW || '50' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          BACKTEST_START: ${{ inputs.start }}
+          BACKTEST_END: ${{ inputs.end }}
+          BACKTEST_WATCHLIST: ${{ inputs.watchlist }}
+          BACKTEST_INITIAL_EQUITY: ${{ inputs.initial_equity }}
+          BACKTEST_OUTPUT_JSON: ${{ inputs.output_json }}
+        run: |
+          args=(
+            --start "$BACKTEST_START"
+            --end "$BACKTEST_END"
+            --watchlist "$BACKTEST_WATCHLIST"
+            --initial-equity "$BACKTEST_INITIAL_EQUITY"
+          )
+          if [ "$BACKTEST_OUTPUT_JSON" = "true" ]; then
+            args+=(--json)
+          fi
+          python src/backtest.py "${args[@]}"

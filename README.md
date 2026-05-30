@@ -170,9 +170,61 @@ cp .env.example .env
 python src/swing_trader.py
 ```
 
-### 4.2 GitHub Actions 手動測試
+### 4.2 本機回測
+
+回測目前支援 `sma_trend` 策略，使用 Alpaca 日線資料。它不會送單，也不需要 FMP key；只需要 Alpaca market data 權限。
+
+```bash
+python src/backtest.py \
+  --start 2025-01-01 \
+  --end 2025-12-31 \
+  --watchlist SPY,AAPL \
+  --initial-equity 10000
+```
+
+也可以用 `.env`：
+
+```text
+WATCHLIST=SPY,AAPL
+DATA_FEED=iex
+BACKTEST_START=2025-01-01
+BACKTEST_END=2025-12-31
+BACKTEST_INITIAL_EQUITY=10000
+RISK_FRACTION=0.01
+REWARD_RISK_RATIO=2.0
+STOP_LOSS_PCT=0.05
+SMA_FAST=20
+SMA_SLOW=50
+```
+
+回測假設：
+
+- 用收盤後確認的 SMA 訊號，下一個交易日開盤進場。
+- 每次最多一個持倉，和實盤 guard 一致。
+- 每筆交易用 `equity × RISK_FRACTION ÷ 每股風險` 算張數。
+- 日線內若 stop-loss 和 take-profit 同時碰到，保守視為 stop-loss 先成交。
+- 趨勢反轉出場使用當日收盤價，stop-loss / take-profit 使用設定價。
+
+### 4.3 GitHub Actions 手動測試
 
 照「3.1 手動觸發」執行 workflow。
+
+### 4.4 GitHub Actions 回測
+
+如果 Alpaca credentials 已經放在 GitHub Secrets，可以直接到 Actions 頁面選 `Alpaca Strategy Backtest`，按 `Run workflow`，填：
+
+```text
+start=2025-01-01
+end=2025-12-31
+watchlist=SPY,AAPL
+initial_equity=10000
+output_json=false
+```
+
+這個 workflow 只跑回測，不會送單，也不需要 `FMP_API_KEY`。它會使用：
+
+- Secrets: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`
+- Variables: `PAPER`, `DATA_FEED`, `RISK_FRACTION`, `REWARD_RISK_RATIO`, `STOP_LOSS_PCT`, `ALLOW_FRACTIONAL`, `SMA_FAST`, `SMA_SLOW`, `LOG_LEVEL`
 
 ---
 

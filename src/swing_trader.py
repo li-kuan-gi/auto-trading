@@ -278,11 +278,11 @@ class AlpacaRestClient:
         return self._request("POST", self.settings.trading_base, "/v2/orders", json_body=order_payload) or {}
 
     def get_historical_daily_bars(self, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
-        data = self._request(
-            "GET",
-            DATA_BASE,
-            "/v2/stocks/bars",
-            params={
+        bars: list[dict[str, Any]] = []
+        page_token: Optional[str] = None
+
+        while True:
+            params = {
                 "symbols": symbol,
                 "timeframe": "1Day",
                 "start": start.isoformat(),
@@ -290,14 +290,21 @@ class AlpacaRestClient:
                 "adjustment": "all",
                 "feed": self.settings.data_feed,
                 "limit": 1000,
-            },
-        )
-        if data is None:
-            return []
-        bars_by_symbol = data.get("bars", {})
-        if isinstance(bars_by_symbol, dict):
-            return bars_by_symbol.get(symbol, []) or []
-        return []
+            }
+            if page_token:
+                params["page_token"] = page_token
+
+            data = self._request("GET", DATA_BASE, "/v2/stocks/bars", params=params)
+            if data is None:
+                return bars
+
+            bars_by_symbol = data.get("bars", {})
+            if isinstance(bars_by_symbol, dict):
+                bars.extend(bars_by_symbol.get(symbol, []) or [])
+
+            page_token = data.get("next_page_token")
+            if not page_token:
+                return bars
 
     def get_latest_quote(self, symbol: str) -> Optional[dict[str, Any]]:
         data = self._request(
