@@ -40,6 +40,9 @@ from swing_trader import (
 )
 
 
+DailyTrendCache = dict[str, dict[date, tuple[bool, Decimal]]]
+
+
 @dataclass(frozen=True)
 class IntradaySettings:
     alpaca_api_key: str
@@ -295,10 +298,32 @@ def update_drawdown(equity: Decimal, peak_equity: Decimal, max_drawdown: Decimal
     return peak_equity, max(max_drawdown, drawdown)
 
 
+def build_daily_trend_cache(
+    settings: IntradaySettings,
+    daily_bars_by_symbol: dict[str, list[dict[str, Any]]],
+    intraday_bars_by_symbol: dict[str, list[dict[str, Any]]],
+) -> DailyTrendCache:
+    trading_dates = sorted({
+        parse_bar_time(bar).date()
+        for bars in intraday_bars_by_symbol.values()
+        for bar in bars
+        if settings.start <= parse_bar_time(bar).date() <= settings.end
+    })
+    symbols = sorted(set(settings.watchlist + [settings.market_symbol]))
+    return {
+        symbol: {
+            trading_date: daily_trend_pass(settings, daily_bars_by_symbol.get(symbol, []), trading_date)
+            for trading_date in trading_dates
+        }
+        for symbol in symbols
+    }
+
+
 def run_backtest(
     settings: IntradaySettings,
     daily_bars_by_symbol: dict[str, list[dict[str, Any]]],
     intraday_bars_by_symbol: dict[str, list[dict[str, Any]]],
+    daily_trend_cache: DailyTrendCache | None = None,
 ) -> dict[str, Any]:
     market_daily = daily_bars_by_symbol[settings.market_symbol]
     time_index_by_symbol = {
@@ -382,7 +407,10 @@ def run_backtest(
         if position is not None or pending_entry is not None:
             continue
 
-        market_ok, _ = daily_trend_pass(settings, market_daily, current_time.date())
+        if daily_trend_cache is not None:
+            market_ok, _ = daily_trend_cache.get(settings.market_symbol, {}).get(current_time.date(), (False, Decimal("0")))
+        else:
+            market_ok, _ = daily_trend_pass(settings, market_daily, current_time.date())
         if not market_ok:
             continue
 
@@ -392,11 +420,14 @@ def run_backtest(
             index = time_index_by_symbol.get(symbol, {}).get(current_time)
             if index is None:
                 continue
-            symbol_ok, trend_strength = daily_trend_pass(
-                settings,
-                daily_bars_by_symbol.get(symbol, []),
-                current_time.date(),
-            )
+            if daily_trend_cache is not None:
+                symbol_ok, trend_strength = daily_trend_cache.get(symbol, {}).get(current_time.date(), (False, Decimal("0")))
+            else:
+                symbol_ok, trend_strength = daily_trend_pass(
+                    settings,
+                    daily_bars_by_symbol.get(symbol, []),
+                    current_time.date(),
+                )
             if not symbol_ok:
                 continue
             signal = intraday_signal_for_index(

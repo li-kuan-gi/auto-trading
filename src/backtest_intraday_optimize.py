@@ -17,6 +17,7 @@ from backtest import decimal_to_str
 from backtest_intraday import (
     AlpacaRestClient,
     IntradaySettings,
+    build_daily_trend_cache,
     fetch_bars,
     load_settings,
     run_backtest,
@@ -140,6 +141,7 @@ def optimize(base: IntradaySettings, args: argparse.Namespace) -> list[IntradayO
     )
 
     rows: list[IntradayOptimizationRow] = []
+    daily_trend_cache_by_sma: dict[tuple[int, int], Any] = {}
     for daily_fast in daily_fast_values:
         for daily_slow in daily_slow_values:
             if daily_fast >= daily_slow:
@@ -161,7 +163,19 @@ def optimize(base: IntradaySettings, args: argparse.Namespace) -> list[IntradayO
                                     risk_fraction=risk_fraction,
                                 )
                                 validate_settings(settings)
-                                result = run_backtest(settings, daily_bars, intraday_bars)
+                                daily_sma_key = (daily_fast, daily_slow)
+                                if daily_sma_key not in daily_trend_cache_by_sma:
+                                    daily_trend_cache_by_sma[daily_sma_key] = build_daily_trend_cache(
+                                        settings,
+                                        daily_bars,
+                                        intraday_bars,
+                                    )
+                                result = run_backtest(
+                                    settings,
+                                    daily_bars,
+                                    intraday_bars,
+                                    daily_trend_cache=daily_trend_cache_by_sma[daily_sma_key],
+                                )
                                 summary = result["summary"]
                                 rows.append(IntradayOptimizationRow(
                                     daily_fast=daily_fast,
