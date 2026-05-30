@@ -255,6 +255,32 @@ rank sma stop rr risk final return max_dd trades win_rate profit_factor score
 
 `score` 是排序輔助值，偏好較高 profit factor / 報酬，並懲罰較高 drawdown；不要只看第一名，應挑交易數足夠、跨年份仍穩定的組合。
 
+### 4.6 GitHub Actions 1H swing 回測
+
+到 Actions 頁面選 `Alpaca Intraday Swing Backtest`，按 `Run workflow`。預設策略是：
+
+```text
+daily trend filter: daily SMA 30 > SMA 100, close > SMA 30
+market filter: QQQ daily SMA 30 > SMA 100
+entry trigger: 1Hour close crosses above 1Hour SMA 20
+stop_loss_pct=0.03
+reward_risk_ratio=2.5
+risk_fraction=0.001
+```
+
+它會額外輸出 day trade 壓力：
+
+```text
+day_trades
+max_day_trades_in_5_business_days
+same_day_exit_rate
+avg_holding_hours
+median_holding_hours
+exit_reasons
+```
+
+這個回測先不禁止 same-day exit；目標是看 1H swing 策略自然會產生多少同日進出，再決定是否需要 2H、minimum holding period 或 day-trade 上限。
+
 ---
 
 ## 5. 預設不會開倉

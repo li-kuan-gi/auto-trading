@@ -1,0 +1,128 @@
+name: Alpaca Intraday Swing Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Backtest start date, YYYY-MM-DD"
+        required: true
+        default: "2025-01-01"
+      end:
+        description: "Backtest end date, YYYY-MM-DD"
+        required: true
+        default: "2025-12-31"
+      watchlist:
+        description: "Comma-separated symbols"
+        required: true
+        default: "QQQ,SMH,NVDA,AVGO,AMD,MU,MSFT,GOOGL,META,AMZN,ORCL,SPY"
+      market_symbol:
+        description: "Market trend filter symbol"
+        required: true
+        default: "QQQ"
+      initial_equity:
+        description: "Starting equity"
+        required: true
+        default: "10000"
+      intraday_timeframe:
+        description: "Intraday timeframe"
+        required: true
+        default: "1Hour"
+      daily_fast:
+        description: "Daily fast SMA"
+        required: true
+        default: "30"
+      daily_slow:
+        description: "Daily slow SMA"
+        required: true
+        default: "100"
+      intraday_sma:
+        description: "Intraday SMA trigger"
+        required: true
+        default: "20"
+      breakout_lookback:
+        description: "Prior intraday highs breakout lookback; 0 disables"
+        required: true
+        default: "0"
+      stop_loss_pct:
+        description: "Stop-loss percentage"
+        required: true
+        default: "0.03"
+      reward_risk_ratio:
+        description: "Reward/risk ratio"
+        required: true
+        default: "2.5"
+      risk_fraction:
+        description: "Risk fraction per trade"
+        required: true
+        default: "0.001"
+      output_json:
+        description: "Print full JSON result"
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: alpaca-intraday-swing-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run intraday backtest
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          PAPER: ${{ vars.PAPER || 'true' }}
+          DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
+          ALLOW_FRACTIONAL: ${{ vars.ALLOW_FRACTIONAL || 'false' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          BACKTEST_START: ${{ inputs.start }}
+          BACKTEST_END: ${{ inputs.end }}
+          BACKTEST_WATCHLIST: ${{ inputs.watchlist }}
+          MARKET_SYMBOL: ${{ inputs.market_symbol }}
+          BACKTEST_INITIAL_EQUITY: ${{ inputs.initial_equity }}
+          INTRADAY_TIMEFRAME: ${{ inputs.intraday_timeframe }}
+          DAILY_FAST: ${{ inputs.daily_fast }}
+          DAILY_SLOW: ${{ inputs.daily_slow }}
+          INTRADAY_SMA: ${{ inputs.intraday_sma }}
+          BREAKOUT_LOOKBACK: ${{ inputs.breakout_lookback }}
+          STOP_LOSS_PCT: ${{ inputs.stop_loss_pct }}
+          REWARD_RISK_RATIO: ${{ inputs.reward_risk_ratio }}
+          RISK_FRACTION: ${{ inputs.risk_fraction }}
+          OUTPUT_JSON: ${{ inputs.output_json }}
+        run: |
+          args=(
+            --start "$BACKTEST_START"
+            --end "$BACKTEST_END"
+            --watchlist "$BACKTEST_WATCHLIST"
+            --market-symbol "$MARKET_SYMBOL"
+            --initial-equity "$BACKTEST_INITIAL_EQUITY"
+            --intraday-timeframe "$INTRADAY_TIMEFRAME"
+            --daily-fast "$DAILY_FAST"
+            --daily-slow "$DAILY_SLOW"
+            --intraday-sma "$INTRADAY_SMA"
+            --breakout-lookback "$BREAKOUT_LOOKBACK"
+            --stop-loss-pct "$STOP_LOSS_PCT"
+            --reward-risk-ratio "$REWARD_RISK_RATIO"
+            --risk-fraction "$RISK_FRACTION"
+          )
+          if [ "$OUTPUT_JSON" = "true" ]; then
+            args+=(--json)
+          fi
+          python src/backtest_intraday.py "${args[@]}"

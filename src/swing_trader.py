@@ -277,14 +277,14 @@ class AlpacaRestClient:
     def submit_order(self, order_payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", self.settings.trading_base, "/v2/orders", json_body=order_payload) or {}
 
-    def get_historical_daily_bars(self, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
+    def get_historical_stock_bars(self, symbol: str, timeframe: str, start: date, end: date) -> list[dict[str, Any]]:
         bars: list[dict[str, Any]] = []
         page_token: Optional[str] = None
 
         while True:
             params = {
                 "symbols": symbol,
-                "timeframe": "1Day",
+                "timeframe": timeframe,
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "adjustment": "all",
@@ -305,6 +305,9 @@ class AlpacaRestClient:
             page_token = data.get("next_page_token")
             if not page_token:
                 return bars
+
+    def get_historical_daily_bars(self, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
+        return self.get_historical_stock_bars(symbol, "1Day", start, end)
 
     def get_latest_quote(self, symbol: str) -> Optional[dict[str, Any]]:
         data = self._request(
