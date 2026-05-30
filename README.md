@@ -281,6 +281,22 @@ exit_reasons
 
 這個回測先不禁止 same-day exit；目標是看 1H swing 策略自然會產生多少同日進出，再決定是否需要 2H、minimum holding period 或 day-trade 上限。
 
+### 4.7 GitHub Actions 1H swing 參數最佳化
+
+到 Actions 頁面選 `Alpaca Intraday Swing Optimize`，按 `Run workflow`。預設會測：
+
+```text
+daily_fast_values=20,30
+daily_slow_values=100,150
+intraday_sma_values=10,20,30
+breakout_lookback_values=0,3,5
+stop_loss_values=0.02,0.03,0.05
+reward_risk_values=1.5,2.0,2.5,3.0
+risk_fraction_values=0.001
+```
+
+排名會把 day trade 壓力納入懲罰；`max_day_trades` 預設是 `3`，也就是 `max_day_trades_in_5_business_days` 超過 3 的組合會被扣分。
+
 ---
 
 ## 5. 預設不會開倉

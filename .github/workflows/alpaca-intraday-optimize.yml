@@ -1,0 +1,146 @@
+name: Alpaca Intraday Swing Optimize
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Backtest start date, YYYY-MM-DD"
+        required: true
+        default: "2025-01-01"
+      end:
+        description: "Backtest end date, YYYY-MM-DD"
+        required: true
+        default: "2025-12-31"
+      watchlist:
+        description: "Comma-separated symbols"
+        required: true
+        default: "QQQ,SMH,NVDA,AVGO,AMD,MU,MSFT,GOOGL,META,AMZN,ORCL,SPY"
+      market_symbol:
+        description: "Market trend filter symbol"
+        required: true
+        default: "QQQ"
+      initial_equity:
+        description: "Starting equity"
+        required: true
+        default: "10000"
+      intraday_timeframe:
+        description: "Intraday timeframe"
+        required: true
+        default: "1Hour"
+      daily_fast_values:
+        description: "Comma-separated daily fast SMA values"
+        required: true
+        default: "20,30"
+      daily_slow_values:
+        description: "Comma-separated daily slow SMA values"
+        required: true
+        default: "100,150"
+      intraday_sma_values:
+        description: "Comma-separated intraday SMA values"
+        required: true
+        default: "10,20,30"
+      breakout_lookback_values:
+        description: "Comma-separated breakout lookback values"
+        required: true
+        default: "0,3,5"
+      stop_loss_values:
+        description: "Comma-separated stop-loss percentages"
+        required: true
+        default: "0.02,0.03,0.05"
+      reward_risk_values:
+        description: "Comma-separated reward/risk ratios"
+        required: true
+        default: "1.5,2.0,2.5,3.0"
+      risk_fraction_values:
+        description: "Comma-separated risk fractions"
+        required: true
+        default: "0.001"
+      min_trades:
+        description: "Rows with fewer trades get a large score penalty"
+        required: true
+        default: "12"
+      max_day_trades:
+        description: "Penalty starts above this 5-business-day day-trade count"
+        required: true
+        default: "3"
+      top:
+        description: "Number of ranked rows to print"
+        required: true
+        default: "20"
+      output_json:
+        description: "Print full JSON result"
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: alpaca-intraday-swing-optimize
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run intraday optimizer
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          PAPER: ${{ vars.PAPER || 'true' }}
+          DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
+          ALLOW_FRACTIONAL: ${{ vars.ALLOW_FRACTIONAL || 'false' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          BACKTEST_START: ${{ inputs.start }}
+          BACKTEST_END: ${{ inputs.end }}
+          BACKTEST_WATCHLIST: ${{ inputs.watchlist }}
+          MARKET_SYMBOL: ${{ inputs.market_symbol }}
+          BACKTEST_INITIAL_EQUITY: ${{ inputs.initial_equity }}
+          INTRADAY_TIMEFRAME: ${{ inputs.intraday_timeframe }}
+          OPT_DAILY_FAST_VALUES: ${{ inputs.daily_fast_values }}
+          OPT_DAILY_SLOW_VALUES: ${{ inputs.daily_slow_values }}
+          OPT_INTRADAY_SMA_VALUES: ${{ inputs.intraday_sma_values }}
+          OPT_BREAKOUT_LOOKBACK_VALUES: ${{ inputs.breakout_lookback_values }}
+          OPT_STOP_LOSS_VALUES: ${{ inputs.stop_loss_values }}
+          OPT_REWARD_RISK_VALUES: ${{ inputs.reward_risk_values }}
+          OPT_RISK_FRACTION_VALUES: ${{ inputs.risk_fraction_values }}
+          OPT_MIN_TRADES: ${{ inputs.min_trades }}
+          OPT_MAX_DAY_TRADES: ${{ inputs.max_day_trades }}
+          OPT_TOP: ${{ inputs.top }}
+          OPT_OUTPUT_JSON: ${{ inputs.output_json }}
+        run: |
+          args=(
+            --start "$BACKTEST_START"
+            --end "$BACKTEST_END"
+            --watchlist "$BACKTEST_WATCHLIST"
+            --market-symbol "$MARKET_SYMBOL"
+            --initial-equity "$BACKTEST_INITIAL_EQUITY"
+            --intraday-timeframe "$INTRADAY_TIMEFRAME"
+            --daily-fast-values "$OPT_DAILY_FAST_VALUES"
+            --daily-slow-values "$OPT_DAILY_SLOW_VALUES"
+            --intraday-sma-values "$OPT_INTRADAY_SMA_VALUES"
+            --breakout-lookback-values "$OPT_BREAKOUT_LOOKBACK_VALUES"
+            --stop-loss-values "$OPT_STOP_LOSS_VALUES"
+            --reward-risk-values "$OPT_REWARD_RISK_VALUES"
+            --risk-fraction-values "$OPT_RISK_FRACTION_VALUES"
+            --min-trades "$OPT_MIN_TRADES"
+            --max-day-trades "$OPT_MAX_DAY_TRADES"
+            --top "$OPT_TOP"
+          )
+          if [ "$OPT_OUTPUT_JSON" = "true" ]; then
+            args+=(--json)
+          fi
+          python src/backtest_intraday_optimize.py "${args[@]}"
