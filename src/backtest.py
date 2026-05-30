@@ -183,20 +183,25 @@ def bar_date(bar: dict[str, Any]) -> date:
     return parse_date(raw)
 
 
-def signal_for_index(settings: BacktestSettings, symbol: str, bars: list[dict[str, Any]], i: int) -> Optional[BacktestSignal]:
+def signal_for_index(
+    settings: BacktestSettings,
+    symbol: str,
+    bars: list[dict[str, Any]],
+    closes: list[Decimal],
+    i: int,
+) -> Optional[BacktestSignal]:
     if i < settings.sma_slow + 1 or i + 1 >= len(bars):
         return None
 
-    history = bars[: i + 1]
-    closes = [d(b["c"]) for b in history if "c" in b]
-    if len(closes) < settings.sma_slow + 2:
+    history_closes = closes[: i + 1]
+    if len(history_closes) < settings.sma_slow + 2:
         return None
 
-    latest_close = closes[-1]
-    prev_close = closes[-2]
-    latest_fast = compute_sma(closes, settings.sma_fast)
-    latest_slow = compute_sma(closes, settings.sma_slow)
-    prev_fast = compute_sma(closes[:-1], settings.sma_fast)
+    latest_close = history_closes[-1]
+    prev_close = history_closes[-2]
+    latest_fast = compute_sma(history_closes, settings.sma_fast)
+    latest_slow = compute_sma(history_closes, settings.sma_slow)
+    prev_fast = compute_sma(history_closes[:-1], settings.sma_fast)
 
     signal = latest_fast > latest_slow and latest_close > latest_fast and prev_close <= prev_fast
     if not signal:
@@ -229,7 +234,13 @@ def signal_for_index(settings: BacktestSettings, symbol: str, bars: list[dict[st
     )
 
 
-def exit_reason_for_bar(settings: BacktestSettings, position: Position, bars: list[dict[str, Any]], i: int) -> Optional[tuple[str, Decimal]]:
+def exit_reason_for_bar(
+    settings: BacktestSettings,
+    position: Position,
+    bars: list[dict[str, Any]],
+    closes: list[Decimal],
+    i: int,
+) -> Optional[tuple[str, Decimal]]:
     bar = bars[i]
     open_price = d(bar["o"])
     low = d(bar["l"])
@@ -240,13 +251,13 @@ def exit_reason_for_bar(settings: BacktestSettings, position: Position, bars: li
     if high >= position.take_profit_price:
         return "take_profit", position.take_profit_price
 
-    closes = [d(b["c"]) for b in bars[: i + 1] if "c" in b]
-    if len(closes) < settings.sma_slow:
+    history_closes = closes[: i + 1]
+    if len(history_closes) < settings.sma_slow:
         return None
 
-    latest_close = closes[-1]
-    latest_fast = compute_sma(closes, settings.sma_fast)
-    latest_slow = compute_sma(closes, settings.sma_slow)
+    latest_close = history_closes[-1]
+    latest_fast = compute_sma(history_closes, settings.sma_fast)
+    latest_slow = compute_sma(history_closes, settings.sma_slow)
     if latest_fast < latest_slow or latest_close < latest_slow:
         return "sma_exit", round_price(latest_close)
 
@@ -288,7 +299,20 @@ def fetch_historical_bars(settings: BacktestSettings, client: AlpacaRestClient) 
 
 
 def run_backtest_on_bars(settings: BacktestSettings, bars_by_symbol: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    timeline = sorted({bar_date(bar) for bars in bars_by_symbol.values() for bar in bars if settings.start <= bar_date(bar) <= settings.end})
+    date_index_by_symbol = {
+        symbol: {bar_date(bar): i for i, bar in enumerate(bars)}
+        for symbol, bars in bars_by_symbol.items()
+    }
+    closes_by_symbol = {
+        symbol: [d(bar["c"]) for bar in bars]
+        for symbol, bars in bars_by_symbol.items()
+    }
+    timeline = sorted({
+        dt
+        for date_index in date_index_by_symbol.values()
+        for dt in date_index
+        if settings.start <= dt <= settings.end
+    })
 
     equity = settings.initial_equity
     peak_equity = equity
@@ -314,10 +338,11 @@ def run_backtest_on_bars(settings: BacktestSettings, bars_by_symbol: dict[str, l
 
         if position is not None:
             bars = bars_by_symbol[position.symbol]
-            indexes = [i for i, bar in enumerate(bars) if bar_date(bar) == current_date]
-            if indexes:
-                bar = bars[indexes[0]]
-                exit_result = exit_reason_for_bar(settings, position, bars, indexes[0])
+            index = date_index_by_symbol[position.symbol].get(current_date)
+            if index is not None:
+                bar = bars[index]
+                closes = closes_by_symbol[position.symbol]
+                exit_result = exit_reason_for_bar(settings, position, bars, closes, index)
                 if exit_result:
                     reason, exit_price = exit_result
                     drawdown_price = exit_price if reason == "stop_loss" else min(d(bar["l"]), exit_price)
@@ -347,9 +372,9 @@ def run_backtest_on_bars(settings: BacktestSettings, bars_by_symbol: dict[str, l
 
         candidates: list[BacktestSignal] = []
         for symbol, bars in bars_by_symbol.items():
-            indexes = [i for i, bar in enumerate(bars) if bar_date(bar) == current_date]
-            if indexes:
-                signal = signal_for_index(settings, symbol, bars, indexes[0])
+            index = date_index_by_symbol[symbol].get(current_date)
+            if index is not None:
+                signal = signal_for_index(settings, symbol, bars, closes_by_symbol[symbol], index)
                 if signal is not None:
                     candidates.append(signal)
         if candidates:
