@@ -226,6 +226,35 @@ output_json=false
 - Secrets: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`
 - Variables: `PAPER`, `DATA_FEED`, `RISK_FRACTION`, `REWARD_RISK_RATIO`, `STOP_LOSS_PCT`, `ALLOW_FRACTIONAL`, `SMA_FAST`, `SMA_SLOW`, `LOG_LEVEL`
 
+### 4.5 GitHub Actions 參數最佳化
+
+到 Actions 頁面選 `Alpaca Backtest Optimize`，按 `Run workflow`。預設會用目前科技股 watchlist，測這些組合：
+
+```text
+SMA_FAST: 10,20,30
+SMA_SLOW: 50,100,150,200
+STOP_LOSS_PCT: 0.02,0.03,0.05,0.08
+REWARD_RISK_RATIO: 1.5,2.0,2.5,3.0
+RISK_FRACTION: 0.001
+```
+
+本機也可以跑：
+
+```bash
+python src/backtest_optimize.py \
+  --start 2025-01-01 \
+  --end 2025-12-31 \
+  --watchlist QQQ,SMH,NVDA,AVGO,AMD,MU,MSFT,GOOGL,META,AMZN,ORCL,SPY
+```
+
+排名表會顯示：
+
+```text
+rank sma stop rr risk final return max_dd trades win_rate profit_factor score
+```
+
+`score` 是排序輔助值，偏好較高 profit factor / 報酬，並懲罰較高 drawdown；不要只看第一名，應挑交易數足夠、跨年份仍穩定的組合。
+
 ---
 
 ## 5. 預設不會開倉

@@ -101,6 +101,28 @@ def parse_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def validate_backtest_settings(settings: BacktestSettings) -> None:
+    missing = []
+    if not settings.alpaca_api_key:
+        missing.append("ALPACA_API_KEY")
+    if not settings.alpaca_secret_key:
+        missing.append("ALPACA_SECRET_KEY")
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    if settings.start >= settings.end:
+        raise ValueError("BACKTEST_START must be before BACKTEST_END")
+    if settings.initial_equity <= 0:
+        raise ValueError("BACKTEST_INITIAL_EQUITY must be > 0")
+    if settings.risk_fraction <= 0 or settings.risk_fraction > Decimal("0.10"):
+        raise ValueError("RISK_FRACTION must be > 0 and <= 0.10")
+    if settings.reward_risk_ratio <= 0:
+        raise ValueError("REWARD_RISK_RATIO must be > 0")
+    if settings.stop_loss_pct <= 0 or settings.stop_loss_pct >= Decimal("0.50"):
+        raise ValueError("STOP_LOSS_PCT must be > 0 and < 0.50")
+    if settings.sma_fast <= 1 or settings.sma_slow <= 1 or settings.sma_fast >= settings.sma_slow:
+        raise ValueError("SMA_FAST must be > 1 and < SMA_SLOW")
+
+
 def load_backtest_settings(args: argparse.Namespace) -> BacktestSettings:
     if load_dotenv is not None:
         load_dotenv()
@@ -126,26 +148,7 @@ def load_backtest_settings(args: argparse.Namespace) -> BacktestSettings:
         log_level=env_str("LOG_LEVEL", "INFO").upper(),
     )
 
-    missing = []
-    if not settings.alpaca_api_key:
-        missing.append("ALPACA_API_KEY")
-    if not settings.alpaca_secret_key:
-        missing.append("ALPACA_SECRET_KEY")
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
-    if settings.start >= settings.end:
-        raise ValueError("BACKTEST_START must be before BACKTEST_END")
-    if settings.initial_equity <= 0:
-        raise ValueError("BACKTEST_INITIAL_EQUITY must be > 0")
-    if settings.risk_fraction <= 0 or settings.risk_fraction > Decimal("0.10"):
-        raise ValueError("RISK_FRACTION must be > 0 and <= 0.10")
-    if settings.reward_risk_ratio <= 0:
-        raise ValueError("REWARD_RISK_RATIO must be > 0")
-    if settings.stop_loss_pct <= 0 or settings.stop_loss_pct >= Decimal("0.50"):
-        raise ValueError("STOP_LOSS_PCT must be > 0 and < 0.50")
-    if settings.sma_fast <= 1 or settings.sma_slow <= 1 or settings.sma_fast >= settings.sma_slow:
-        raise ValueError("SMA_FAST must be > 1 and < SMA_SLOW")
-
+    validate_backtest_settings(settings)
     return settings
 
 
@@ -276,12 +279,15 @@ def public_settings(settings: BacktestSettings) -> dict[str, Any]:
     return result
 
 
-def run_backtest(settings: BacktestSettings, client: AlpacaRestClient) -> dict[str, Any]:
+def fetch_historical_bars(settings: BacktestSettings, client: AlpacaRestClient) -> dict[str, list[dict[str, Any]]]:
     warmup_start = settings.start - timedelta(days=settings.sma_slow * 3)
-    bars_by_symbol = {
+    return {
         symbol: client.get_historical_daily_bars(symbol, warmup_start, settings.end)
         for symbol in settings.watchlist
     }
+
+
+def run_backtest_on_bars(settings: BacktestSettings, bars_by_symbol: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     timeline = sorted({bar_date(bar) for bars in bars_by_symbol.values() for bar in bars if settings.start <= bar_date(bar) <= settings.end})
 
     equity = settings.initial_equity
@@ -391,6 +397,10 @@ def run_backtest(settings: BacktestSettings, client: AlpacaRestClient) -> dict[s
         },
         "trades": [dataclasses.asdict(trade) for trade in trades],
     }
+
+
+def run_backtest(settings: BacktestSettings, client: AlpacaRestClient) -> dict[str, Any]:
+    return run_backtest_on_bars(settings, fetch_historical_bars(settings, client))
 
 
 def print_report(result: dict[str, Any]) -> None:
