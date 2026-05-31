@@ -46,13 +46,22 @@ FMP_API_KEY
 ```text
 ENABLE_TRADING=false
 PAPER=true
-WATCHLIST=SPY
+WATCHLIST=QQQ,SMH,NVDA,AVGO,AMD,MU,MSFT,GOOGL,META,AMZN,ORCL,SPY
 STRATEGY=disabled
 SYMBOL_SELECTION_METHOD=best_signal
 DATA_FEED=iex
+MARKET_SYMBOL=QQQ
+RISK_FRACTION=0.001
+REWARD_RISK_RATIO=3.0
+STOP_LOSS_PCT=0.03
+INTRADAY_TIMEFRAME=2Hour
+DAILY_FAST=20
+DAILY_SLOW=100
+INTRADAY_SMA=20
+BREAKOUT_LOOKBACK=5
 ```
 
-測試時不要急著開交易。先手動跑 workflow 看 log。
+測試時不要急著開交易。預設 `STRATEGY=disabled` 不會開新倉；要 dry-run 新策略時，明確設定 `STRATEGY=intraday_swing` 並保持 `ENABLE_TRADING=false`。
 
 ---
 
@@ -189,6 +198,7 @@ WATCHLIST=SPY,AAPL
 DATA_FEED=iex
 BACKTEST_START=2025-01-01
 BACKTEST_END=2025-12-31
+BACKTEST_END_MODE=window
 BACKTEST_INITIAL_EQUITY=10000
 RISK_FRACTION=0.01
 REWARD_RISK_RATIO=2.0
@@ -255,18 +265,24 @@ rank sma stop rr risk final return max_dd trades win_rate profit_factor score
 
 `score` 是排序輔助值，偏好較高 profit factor / 報酬，並懲罰較高 drawdown；不要只看第一名，應挑交易數足夠、跨年份仍穩定的組合。
 
-### 4.6 GitHub Actions 1H swing 回測
+### 4.6 GitHub Actions intraday swing 回測
 
 到 Actions 頁面選 `Alpaca Intraday Swing Backtest`，按 `Run workflow`。預設策略是：
 
 ```text
-daily trend filter: daily SMA 30 > SMA 100, close > SMA 30
-market filter: QQQ daily SMA 30 > SMA 100
-entry trigger: 1Hour close crosses above 1Hour SMA 20
+daily trend filter: daily SMA 20 > SMA 100, close > SMA 20
+market filter: QQQ daily SMA 20 > SMA 100
+entry trigger: 2Hour close crosses above 2Hour SMA 20
+breakout filter: close above prior 5 intraday highs
 stop_loss_pct=0.03
-reward_risk_ratio=2.5
+reward_risk_ratio=3.0
 risk_fraction=0.001
 ```
+
+`end_mode` 有兩種語意，預設是 `window`：
+
+- `window`：`--end` 是固定績效統計截止日；持倉會在回測窗口內清算，`final_equity` 可當作固定期間績效。
+- `signal-cohort`：只限制 entry signal 與建倉時間必須落在 `[--start, --end]`；出場可在 `--end` 後依策略自然發生，適合評估該期間訊號 cohort 的完整結果，不應直接和嚴格 window 績效混比。
 
 它會額外輸出 day trade 壓力：
 
@@ -279,9 +295,9 @@ median_holding_hours
 exit_reasons
 ```
 
-這個回測先不禁止 same-day exit；目標是看 1H swing 策略自然會產生多少同日進出，再決定是否需要 2H、minimum holding period 或 day-trade 上限。
+這個回測先不禁止 same-day exit；目標是持續量測策略自然會產生多少同日進出，再決定是否需要 minimum holding period 或 day-trade 上限。
 
-### 4.7 GitHub Actions 1H swing 參數最佳化
+### 4.7 GitHub Actions intraday swing 參數最佳化
 
 到 Actions 頁面選 `Alpaca Intraday Swing Optimize`，按 `Run workflow`。預設會測：
 
@@ -297,11 +313,13 @@ risk_fraction_values=0.001
 
 排名會把 day trade 壓力納入懲罰；`max_day_trades` 預設是 `3`，也就是 `max_day_trades_in_5_business_days` 超過 3 的組合會被扣分。
 
+optimizer 也支援同一個 `end_mode`。結果表會標出 mode，避免把 `window` 與 `signal-cohort` 的分數默默混在一起比較。
+
 ---
 
 ## 5. 預設不會開倉
 
-`STRATEGY=disabled` 時永遠不開新倉，只做：
+預設 `STRATEGY=disabled`，所以即使既有環境已設定 `ENABLE_TRADING=true`，未明確選擇策略時仍不會開新倉。`STRATEGY=disabled` 只做：
 
 - 帳戶檢查
 - 市場時鐘檢查
@@ -316,7 +334,7 @@ WATCHLIST=AAPL,SPY
 SYMBOL_SELECTION_METHOD=best_signal
 ```
 
-`best_signal` 會檢查所有候選標的，排除不可交易、被事件 blackout、或策略沒有 signal 的標的，再選策略分數最高者。`sma_trend` 的分數目前由趨勢強度與突破強度組成，log 會輸出 `SYMBOL_CANDIDATE`、`SYMBOL_RANKING` 與 `SELECTED_SYMBOL` 方便檢查。若改成 `first_signal`，才會照 `WATCHLIST` 順序選第一個符合條件的標的。
+`best_signal` 會檢查所有候選標的，排除不可交易、被事件 blackout、或策略沒有 signal 的標的，再選策略分數最高者。`intraday_swing` 的分數目前由日線趨勢強度與 intraday 突破強度組成，log 會輸出 `INTRADAY_STATUS`、`SYMBOL_CANDIDATE`、`SYMBOL_RANKING` 與 `SELECTED_SYMBOL` 方便檢查。若改成 `first_signal`，才會照 `WATCHLIST` 順序選第一個符合條件的標的。
 
 若要測試完整下單流程，可以先設：
 
@@ -331,7 +349,7 @@ STRATEGY=manual_once
 
 ```text
 ENABLE_TRADING=true
-STRATEGY=manual_once
+STRATEGY=intraday_swing
 ```
 
 ---
@@ -354,9 +372,34 @@ STRATEGY=disabled
 STRATEGY=manual_once
 ```
 
+### intraday_swing
+
+目前回測表現較好的策略，必須明確設定才會啟用。條件大致是：
+
+- QQQ 日線趨勢通過：daily SMA 20 > SMA 100，且最新確認日收盤 > SMA 20。
+- 標的本身日線趨勢通過同樣條件。
+- 最新確認 2Hour close 上穿 2Hour SMA 20。
+- 最新確認 2Hour close 高於前 5 根 intraday high。
+- 進場用 bracket order：stop `3%`，take-profit `3R`，每筆風險 `0.1%` equity。
+- 持倉後若最新確認 2Hour close 跌破 2Hour SMA 20，會發出策略出場訊號；stop / take-profit 仍由 Alpaca bracket legs 管理。
+
+```text
+STRATEGY=intraday_swing
+WATCHLIST=QQQ,SMH,NVDA,AVGO,AMD,MU,MSFT,GOOGL,META,AMZN,ORCL,SPY
+MARKET_SYMBOL=QQQ
+RISK_FRACTION=0.001
+REWARD_RISK_RATIO=3.0
+STOP_LOSS_PCT=0.03
+INTRADAY_TIMEFRAME=2Hour
+DAILY_FAST=20
+DAILY_SLOW=100
+INTRADAY_SMA=20
+BREAKOUT_LOOKBACK=5
+```
+
 ### sma_trend
 
-範例策略：使用日線資料，條件大致是：
+舊的日線範例策略：使用日線資料，條件大致是：
 
 - fast SMA > slow SMA
 - 最新收盤價 > fast SMA

@@ -28,6 +28,7 @@ from backtest_intraday import (
 
 @dataclass(frozen=True)
 class IntradayOptimizationRow:
+    end_mode: str
     daily_fast: int
     daily_slow: int
     intraday_sma: int
@@ -73,6 +74,7 @@ def load_base_settings(args: argparse.Namespace) -> IntradaySettings:
         market_symbol=args.market_symbol,
         data_feed=args.data_feed,
         initial_equity=args.initial_equity,
+        end_mode=args.end_mode,
         risk_fraction=None,
         reward_risk_ratio=None,
         stop_loss_pct=None,
@@ -147,6 +149,14 @@ def optimize(base: IntradaySettings, args: argparse.Namespace) -> list[IntradayO
             if daily_fast >= daily_slow:
                 logging.info("SKIP invalid daily SMA combo fast=%s slow=%s", daily_fast, daily_slow)
                 continue
+            daily_sma_key = (daily_fast, daily_slow)
+            if daily_sma_key not in daily_trend_cache_by_sma:
+                daily_trend_cache_by_sma[daily_sma_key] = build_daily_trend_cache(
+                    dataclasses.replace(base, daily_fast=daily_fast, daily_slow=daily_slow),
+                    daily_bars,
+                    intraday_bars,
+                )
+            trend_cache = daily_trend_cache_by_sma[daily_sma_key]
             for intraday_sma in intraday_sma_values:
                 for breakout_lookback in breakout_lookback_values:
                     for stop_loss_pct in stop_loss_values:
@@ -163,21 +173,15 @@ def optimize(base: IntradaySettings, args: argparse.Namespace) -> list[IntradayO
                                     risk_fraction=risk_fraction,
                                 )
                                 validate_settings(settings)
-                                daily_sma_key = (daily_fast, daily_slow)
-                                if daily_sma_key not in daily_trend_cache_by_sma:
-                                    daily_trend_cache_by_sma[daily_sma_key] = build_daily_trend_cache(
-                                        settings,
-                                        daily_bars,
-                                        intraday_bars,
-                                    )
                                 result = run_backtest(
                                     settings,
                                     daily_bars,
                                     intraday_bars,
-                                    daily_trend_cache=daily_trend_cache_by_sma[daily_sma_key],
+                                    daily_trend_cache=trend_cache,
                                 )
                                 summary = result["summary"]
                                 rows.append(IntradayOptimizationRow(
+                                    end_mode=settings.end_mode,
                                     daily_fast=daily_fast,
                                     daily_slow=daily_slow,
                                     intraday_sma=intraday_sma,
@@ -218,13 +222,14 @@ def optimize(base: IntradaySettings, args: argparse.Namespace) -> list[IntradayO
 def print_table(rows: list[IntradayOptimizationRow], limit: int) -> None:
     print("INTRADAY OPTIMIZATION RESULTS")
     print(
-        "rank daily intraday_sma breakout stop rr risk final return max_dd trades "
+        "rank mode daily intraday_sma breakout stop rr risk final return max_dd trades "
         "win_rate profit_factor day_trades max_dt_5d same_day avg_hold_h score"
     )
     for rank, row in enumerate(rows[:limit], start=1):
         profit_factor = "n/a" if row.profit_factor is None else str(row.profit_factor)
         print(
             f"{rank} "
+            f"{row.end_mode} "
             f"{row.daily_fast}/{row.daily_slow} "
             f"{row.intraday_sma} "
             f"{row.breakout_lookback} "
@@ -253,7 +258,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market-symbol", help="Market trend filter symbol.")
     parser.add_argument("--data-feed", help="Alpaca data feed.")
     parser.add_argument("--initial-equity", help="Starting equity.")
-    parser.add_argument("--intraday-timeframe", default="1Hour", help="Intraday timeframe.")
+    parser.add_argument("--intraday-timeframe", default="2Hour", help="Intraday timeframe.")
+    parser.add_argument(
+        "--end-mode",
+        choices=["window", "signal-cohort"],
+        help=(
+            "window liquidates trades within the requested backtest window; "
+            "signal-cohort limits entries to the window but lets exits occur after --end."
+        ),
+    )
     parser.add_argument("--daily-fast-values", default="20,30", help="Comma-separated daily fast SMA values.")
     parser.add_argument("--daily-slow-values", default="100,150", help="Comma-separated daily slow SMA values.")
     parser.add_argument("--intraday-sma-values", default="10,20,30", help="Comma-separated intraday SMA values.")

@@ -34,14 +34,15 @@ jobs:
 
           PAPER: ${{ vars.PAPER || 'true' }}
           ENABLE_TRADING: ${{ vars.ENABLE_TRADING || 'false' }}
-          WATCHLIST: ${{ vars.WATCHLIST || 'SPY' }}
+          WATCHLIST: ${{ vars.WATCHLIST || 'QQQ,SMH,NVDA,AVGO,AMD,MU,MSFT,GOOGL,META,AMZN,ORCL,SPY' }}
           STRATEGY: ${{ vars.STRATEGY || 'disabled' }}
           SYMBOL_SELECTION_METHOD: ${{ vars.SYMBOL_SELECTION_METHOD || 'best_signal' }}
           DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
+          MARKET_SYMBOL: ${{ vars.MARKET_SYMBOL || 'QQQ' }}
 
-          RISK_FRACTION: ${{ vars.RISK_FRACTION || '0.01' }}
-          REWARD_RISK_RATIO: ${{ vars.REWARD_RISK_RATIO || '2.0' }}
-          STOP_LOSS_PCT: ${{ vars.STOP_LOSS_PCT || '0.05' }}
+          RISK_FRACTION: ${{ vars.RISK_FRACTION || '0.001' }}
+          REWARD_RISK_RATIO: ${{ vars.REWARD_RISK_RATIO || '3.0' }}
+          STOP_LOSS_PCT: ${{ vars.STOP_LOSS_PCT || '0.03' }}
           ALLOW_FRACTIONAL: ${{ vars.ALLOW_FRACTIONAL || 'false' }}
           MAX_POSITION_COUNT: ${{ vars.MAX_POSITION_COUNT || '1' }}
 
@@ -52,5 +53,10 @@ jobs:
           SMA_FAST: ${{ vars.SMA_FAST || '20' }}
           SMA_SLOW: ${{ vars.SMA_SLOW || '50' }}
           HISTORICAL_LOOKBACK_DAYS: ${{ vars.HISTORICAL_LOOKBACK_DAYS || '180' }}
+          INTRADAY_TIMEFRAME: ${{ vars.INTRADAY_TIMEFRAME || '2Hour' }}
+          DAILY_FAST: ${{ vars.DAILY_FAST || '20' }}
+          DAILY_SLOW: ${{ vars.DAILY_SLOW || '100' }}
+          INTRADAY_SMA: ${{ vars.INTRADAY_SMA || '20' }}
+          BREAKOUT_LOOKBACK: ${{ vars.BREAKOUT_LOOKBACK || '5' }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
         run: python src/swing_trader.py

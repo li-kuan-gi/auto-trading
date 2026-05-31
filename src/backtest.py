@@ -97,6 +97,13 @@ class TradeResult:
     exit_reason: str
 
 
+@dataclass(frozen=True)
+class ExitResult:
+    reason: str
+    exit_date: date
+    exit_price: Decimal
+
+
 def parse_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
@@ -163,6 +170,7 @@ def to_trader_settings(settings: BacktestSettings) -> Settings:
         strategy="sma_trend",
         symbol_selection_method="best_signal",
         data_feed=settings.data_feed,
+        market_symbol="SPY",
         risk_fraction=settings.risk_fraction,
         reward_risk_ratio=settings.reward_risk_ratio,
         stop_loss_pct=settings.stop_loss_pct,
@@ -174,6 +182,11 @@ def to_trader_settings(settings: BacktestSettings) -> Settings:
         sma_fast=settings.sma_fast,
         sma_slow=settings.sma_slow,
         historical_lookback_days=365,
+        intraday_timeframe="2Hour",
+        daily_fast=20,
+        daily_slow=100,
+        intraday_sma=20,
+        breakout_lookback=5,
         log_level=settings.log_level,
     )
 
@@ -240,16 +253,17 @@ def exit_reason_for_bar(
     bars: list[dict[str, Any]],
     closes: list[Decimal],
     i: int,
-) -> Optional[tuple[str, Decimal]]:
+) -> Optional[ExitResult]:
     bar = bars[i]
+    current_date = bar_date(bar)
     open_price = d(bar["o"])
     low = d(bar["l"])
     high = d(bar["h"])
 
     if low <= position.stop_price:
-        return "stop_loss", round_price(min(open_price, position.stop_price))
+        return ExitResult("stop_loss", current_date, round_price(min(open_price, position.stop_price)))
     if high >= position.take_profit_price:
-        return "take_profit", position.take_profit_price
+        return ExitResult("take_profit", current_date, round_price(max(open_price, position.take_profit_price)))
 
     history_closes = closes[: i + 1]
     if len(history_closes) < settings.sma_slow:
@@ -259,7 +273,10 @@ def exit_reason_for_bar(
     latest_fast = compute_sma(history_closes, settings.sma_fast)
     latest_slow = compute_sma(history_closes, settings.sma_slow)
     if latest_fast < latest_slow or latest_close < latest_slow:
-        return "sma_exit", round_price(latest_close)
+        if i + 1 < len(bars):
+            exit_bar = bars[i + 1]
+            return ExitResult("sma_exit", bar_date(exit_bar), round_price(d(exit_bar["o"])))
+        return ExitResult("sma_exit", current_date, round_price(latest_close))
 
     return None
 
@@ -281,6 +298,28 @@ def update_drawdown(equity: Decimal, peak_equity: Decimal, max_drawdown: Decimal
 
 def mark_position_equity(equity: Decimal, position: Position, price: Decimal) -> Decimal:
     return equity + ((price - position.entry_price) * position.qty)
+
+
+def close_position(
+    equity: Decimal,
+    position: Position,
+    exit_result: ExitResult,
+    trades: list[TradeResult],
+) -> Decimal:
+    pnl = (exit_result.exit_price - position.entry_price) * position.qty
+    equity += pnl
+    trades.append(TradeResult(
+        symbol=position.symbol,
+        entry_date=position.entry_date,
+        exit_date=exit_result.exit_date,
+        entry_price=position.entry_price,
+        exit_price=exit_result.exit_price,
+        qty=position.qty,
+        pnl=pnl,
+        return_pct=(exit_result.exit_price / position.entry_price) - Decimal("1"),
+        exit_reason=exit_result.reason,
+    ))
+    return equity
 
 
 def public_settings(settings: BacktestSettings) -> dict[str, Any]:
@@ -320,8 +359,15 @@ def run_backtest_on_bars(settings: BacktestSettings, bars_by_symbol: dict[str, l
     position: Optional[Position] = None
     trades: list[TradeResult] = []
     pending_entry: Optional[BacktestSignal] = None
+    pending_exit: Optional[ExitResult] = None
 
     for current_date in timeline:
+        if position is not None and pending_exit is not None and pending_exit.exit_date <= current_date:
+            equity = close_position(equity, position, pending_exit, trades)
+            position = None
+            pending_exit = None
+            peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
+
         if pending_entry and pending_entry.entry_date == current_date and position is None:
             qty = calculate_backtest_qty(settings, equity, pending_entry)
             if qty > 0:
@@ -336,7 +382,7 @@ def run_backtest_on_bars(settings: BacktestSettings, bars_by_symbol: dict[str, l
                 )
             pending_entry = None
 
-        if position is not None:
+        if position is not None and pending_exit is None:
             bars = bars_by_symbol[position.symbol]
             index = date_index_by_symbol[position.symbol].get(current_date)
             if index is not None:
@@ -344,25 +390,19 @@ def run_backtest_on_bars(settings: BacktestSettings, bars_by_symbol: dict[str, l
                 closes = closes_by_symbol[position.symbol]
                 exit_result = exit_reason_for_bar(settings, position, bars, closes, index)
                 if exit_result:
-                    reason, exit_price = exit_result
+                    reason = exit_result.reason
+                    exit_date = exit_result.exit_date
+                    exit_price = exit_result.exit_price
                     drawdown_price = exit_price if reason == "stop_loss" else min(d(bar["l"]), exit_price)
                     marked_equity = mark_position_equity(equity, position, drawdown_price)
                     peak_equity, max_drawdown = update_drawdown(marked_equity, peak_equity, max_drawdown)
-                    pnl = (exit_price - position.entry_price) * position.qty
-                    equity += pnl
-                    trades.append(TradeResult(
-                        symbol=position.symbol,
-                        entry_date=position.entry_date,
-                        exit_date=current_date,
-                        entry_price=position.entry_price,
-                        exit_price=exit_price,
-                        qty=position.qty,
-                        pnl=pnl,
-                        return_pct=(exit_price / position.entry_price) - Decimal("1"),
-                        exit_reason=reason,
-                    ))
-                    position = None
-                    peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
+                    if exit_date == current_date:
+                        equity = close_position(equity, position, exit_result, trades)
+                        position = None
+                        peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
+                    else:
+                        pending_exit = exit_result
+                        continue
                 else:
                     marked_equity = mark_position_equity(equity, position, d(bar["l"]))
                     peak_equity, max_drawdown = update_drawdown(marked_equity, peak_equity, max_drawdown)

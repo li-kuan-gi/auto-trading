@@ -11,6 +11,14 @@ on:
         description: "Backtest end date, YYYY-MM-DD"
         required: true
         default: "2025-12-31"
+      end_mode:
+        description: "End boundary mode: window or signal-cohort"
+        required: true
+        type: choice
+        options:
+          - window
+          - signal-cohort
+        default: "window"
       watchlist:
         description: "Comma-separated symbols"
         required: true
@@ -26,7 +34,7 @@ on:
       intraday_timeframe:
         description: "Intraday timeframe"
         required: true
-        default: "1Hour"
+        default: "2Hour"
       daily_fast_values:
         description: "Comma-separated daily fast SMA values"
         required: true
@@ -106,6 +114,7 @@ jobs:
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
           BACKTEST_START: ${{ inputs.start }}
           BACKTEST_END: ${{ inputs.end }}
+          BACKTEST_END_MODE: ${{ inputs.end_mode }}
           BACKTEST_WATCHLIST: ${{ inputs.watchlist }}
           MARKET_SYMBOL: ${{ inputs.market_symbol }}
           BACKTEST_INITIAL_EQUITY: ${{ inputs.initial_equity }}
@@ -125,6 +134,7 @@ jobs:
           args=(
             --start "$BACKTEST_START"
             --end "$BACKTEST_END"
+            --end-mode "$BACKTEST_END_MODE"
             --watchlist "$BACKTEST_WATCHLIST"
             --market-symbol "$MARKET_SYMBOL"
             --initial-equity "$BACKTEST_INITIAL_EQUITY"

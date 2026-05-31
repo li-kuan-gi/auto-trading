@@ -6,16 +6,14 @@ import requests
 
 BASE_URL = "https://paper-api.alpaca.markets/v2"
 
-HEADERS = {
-    "APCA-API-KEY-ID": os.environ["ALPACA_API_KEY"],
-    "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET_KEY"],
-}
-
 
 def alpaca_get(path: str, params: dict | None = None):
     response = requests.get(
         f"{BASE_URL}{path}",
-        headers=HEADERS,
+        headers={
+            "APCA-API-KEY-ID": os.environ["ALPACA_API_KEY"],
+            "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET_KEY"],
+        },
         params=params,
         timeout=30,
     )

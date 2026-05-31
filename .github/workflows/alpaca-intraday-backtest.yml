@@ -11,6 +11,14 @@ on:
         description: "Backtest end date, YYYY-MM-DD"
         required: true
         default: "2025-12-31"
+      end_mode:
+        description: "End boundary mode: window or signal-cohort"
+        required: true
+        type: choice
+        options:
+          - window
+          - signal-cohort
+        default: "window"
       watchlist:
         description: "Comma-separated symbols"
         required: true
@@ -26,11 +34,11 @@ on:
       intraday_timeframe:
         description: "Intraday timeframe"
         required: true
-        default: "1Hour"
+        default: "2Hour"
       daily_fast:
         description: "Daily fast SMA"
         required: true
-        default: "30"
+        default: "20"
       daily_slow:
         description: "Daily slow SMA"
         required: true
@@ -42,7 +50,7 @@ on:
       breakout_lookback:
         description: "Prior intraday highs breakout lookback; 0 disables"
         required: true
-        default: "0"
+        default: "5"
       stop_loss_pct:
         description: "Stop-loss percentage"
         required: true
@@ -50,7 +58,7 @@ on:
       reward_risk_ratio:
         description: "Reward/risk ratio"
         required: true
-        default: "2.5"
+        default: "3.0"
       risk_fraction:
         description: "Risk fraction per trade"
         required: true
@@ -94,6 +102,7 @@ jobs:
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
           BACKTEST_START: ${{ inputs.start }}
           BACKTEST_END: ${{ inputs.end }}
+          BACKTEST_END_MODE: ${{ inputs.end_mode }}
           BACKTEST_WATCHLIST: ${{ inputs.watchlist }}
           MARKET_SYMBOL: ${{ inputs.market_symbol }}
           BACKTEST_INITIAL_EQUITY: ${{ inputs.initial_equity }}
@@ -110,6 +119,7 @@ jobs:
           args=(
             --start "$BACKTEST_START"
             --end "$BACKTEST_END"
+            --end-mode "$BACKTEST_END_MODE"
             --watchlist "$BACKTEST_WATCHLIST"
             --market-symbol "$MARKET_SYMBOL"
             --initial-equity "$BACKTEST_INITIAL_EQUITY"

@@ -1,5 +1,5 @@
 """
-Backtest a 1H swing pullback strategy with daily trend filters.
+Backtest an intraday swing pullback strategy with daily trend filters.
 
 The model intentionally uses confirmed daily bars only: an intraday signal on a
 given date can only see daily trend state through the prior trading day.
@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
 import logging
@@ -28,11 +28,13 @@ from swing_trader import (
     Settings,
     compute_sma,
     d,
+    daily_trend_pass as _swing_daily_trend_pass,
     decimal_to_str,
     env_bool,
     env_decimal,
     env_int,
     env_str,
+    parse_bar_time,
     parse_watchlist,
     round_price,
     round_qty,
@@ -63,6 +65,7 @@ class IntradaySettings:
     breakout_lookback: int
     start: date
     end: date
+    end_mode: str
     log_level: str
 
 
@@ -102,18 +105,20 @@ class IntradayTrade:
     exit_reason: str
 
 
+@dataclass(frozen=True)
+class IntradayExit:
+    reason: str
+    exit_time: datetime
+    exit_price: Decimal
+
+
 def parse_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def parse_bar_time(bar: dict[str, Any]) -> datetime:
-    raw = str(bar.get("t", ""))
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+def normalize_end_mode(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
 
 
 def load_settings(args: argparse.Namespace) -> IntradaySettings:
@@ -132,16 +137,17 @@ def load_settings(args: argparse.Namespace) -> IntradaySettings:
         data_feed=(args.data_feed or env_str("DATA_FEED", "iex")).lower(),
         initial_equity=d(args.initial_equity) if args.initial_equity else env_decimal("BACKTEST_INITIAL_EQUITY", "10000"),
         risk_fraction=d(args.risk_fraction) if args.risk_fraction else env_decimal("RISK_FRACTION", "0.001"),
-        reward_risk_ratio=d(args.reward_risk_ratio) if args.reward_risk_ratio else env_decimal("REWARD_RISK_RATIO", "2.5"),
+        reward_risk_ratio=d(args.reward_risk_ratio) if args.reward_risk_ratio else env_decimal("REWARD_RISK_RATIO", "3.0"),
         stop_loss_pct=d(args.stop_loss_pct) if args.stop_loss_pct else env_decimal("STOP_LOSS_PCT", "0.03"),
         allow_fractional=env_bool("ALLOW_FRACTIONAL", False),
-        intraday_timeframe=args.intraday_timeframe or env_str("INTRADAY_TIMEFRAME", "1Hour"),
-        daily_fast=int(args.daily_fast) if args.daily_fast else env_int("DAILY_FAST", 30),
+        intraday_timeframe=args.intraday_timeframe or env_str("INTRADAY_TIMEFRAME", "2Hour"),
+        daily_fast=int(args.daily_fast) if args.daily_fast else env_int("DAILY_FAST", 20),
         daily_slow=int(args.daily_slow) if args.daily_slow else env_int("DAILY_SLOW", 100),
         intraday_sma=int(args.intraday_sma) if args.intraday_sma else env_int("INTRADAY_SMA", 20),
-        breakout_lookback=int(args.breakout_lookback) if args.breakout_lookback else env_int("BREAKOUT_LOOKBACK", 0),
+        breakout_lookback=int(args.breakout_lookback) if args.breakout_lookback else env_int("BREAKOUT_LOOKBACK", 5),
         start=start,
         end=end,
+        end_mode=normalize_end_mode(getattr(args, "end_mode", None) or env_str("BACKTEST_END_MODE", "window")),
         log_level=env_str("LOG_LEVEL", "INFO").upper(),
     )
     validate_settings(settings)
@@ -172,6 +178,8 @@ def validate_settings(settings: IntradaySettings) -> None:
         raise ValueError("INTRADAY_SMA must be > 1")
     if settings.breakout_lookback < 0:
         raise ValueError("BREAKOUT_LOOKBACK must be >= 0")
+    if settings.end_mode not in {"window", "signal_cohort"}:
+        raise ValueError("BACKTEST_END_MODE must be one of: window, signal_cohort")
 
 
 def to_trader_settings(settings: IntradaySettings) -> Settings:
@@ -182,9 +190,10 @@ def to_trader_settings(settings: IntradaySettings) -> Settings:
         paper=settings.paper,
         enable_trading=False,
         watchlist=settings.watchlist,
-        strategy="sma_trend",
+        strategy="intraday_swing",
         symbol_selection_method="best_signal",
         data_feed=settings.data_feed,
+        market_symbol=settings.market_symbol,
         risk_fraction=settings.risk_fraction,
         reward_risk_ratio=settings.reward_risk_ratio,
         stop_loss_pct=settings.stop_loss_pct,
@@ -196,20 +205,18 @@ def to_trader_settings(settings: IntradaySettings) -> Settings:
         sma_fast=settings.daily_fast,
         sma_slow=settings.daily_slow,
         historical_lookback_days=365,
+        intraday_timeframe=settings.intraday_timeframe,
+        daily_fast=settings.daily_fast,
+        daily_slow=settings.daily_slow,
+        intraday_sma=settings.intraday_sma,
+        breakout_lookback=settings.breakout_lookback,
         log_level=settings.log_level,
     )
 
 
 def daily_trend_pass(settings: IntradaySettings, bars: list[dict[str, Any]], as_of: date) -> tuple[bool, Decimal]:
-    confirmed = [bar for bar in bars if parse_date(str(bar.get("t", ""))[:10]) < as_of]
-    if len(confirmed) < settings.daily_slow:
-        return False, Decimal("0")
-    closes = [d(bar["c"]) for bar in confirmed]
-    fast = compute_sma(closes, settings.daily_fast)
-    slow = compute_sma(closes, settings.daily_slow)
-    latest_close = closes[-1]
-    trend_strength = (fast / slow) - Decimal("1")
-    return fast > slow and latest_close > fast, trend_strength
+    ok, strength, _ = _swing_daily_trend_pass(bars, as_of, settings.daily_fast, settings.daily_slow)
+    return ok, strength
 
 
 def intraday_signal_for_index(
@@ -272,22 +279,30 @@ def exit_for_bar(
     settings: IntradaySettings,
     position: IntradayPosition,
     bar: dict[str, Any],
+    bars: list[dict[str, Any]],
     closes: list[Decimal],
     i: int,
-) -> Optional[tuple[str, Decimal]]:
+) -> Optional[IntradayExit]:
+    current_time = parse_bar_time(bar)
     open_price = d(bar["o"])
     low = d(bar["l"])
     high = d(bar["h"])
     close = d(bar["c"])
 
     if low <= position.stop_price:
-        return "stop_loss", round_price(min(open_price, position.stop_price))
+        return IntradayExit("stop_loss", current_time, round_price(min(open_price, position.stop_price)))
     if high >= position.take_profit_price:
-        return "take_profit", position.take_profit_price
+        return IntradayExit("take_profit", current_time, round_price(max(open_price, position.take_profit_price)))
 
     history = closes[: i + 1]
     if len(history) >= settings.intraday_sma and close < compute_sma(history, settings.intraday_sma):
-        return "intraday_sma_exit", round_price(close)
+        if i + 1 < len(bars):
+            exit_bar = bars[i + 1]
+            exit_time = parse_bar_time(exit_bar)
+            if settings.end_mode == "signal_cohort" or exit_time.date() <= settings.end:
+                return IntradayExit("intraday_sma_exit", exit_time, round_price(d(exit_bar["o"])))
+            return None
+        return IntradayExit("intraday_sma_exit", current_time, round_price(close))
 
     return None
 
@@ -298,16 +313,41 @@ def update_drawdown(equity: Decimal, peak_equity: Decimal, max_drawdown: Decimal
     return peak_equity, max(max_drawdown, drawdown)
 
 
+def close_position(
+    equity: Decimal,
+    position: IntradayPosition,
+    exit_result: IntradayExit,
+    trades: list[IntradayTrade],
+) -> Decimal:
+    pnl = (exit_result.exit_price - position.entry_price) * position.qty
+    equity += pnl
+    holding_hours = Decimal(str((exit_result.exit_time - position.entry_time).total_seconds() / 3600))
+    trades.append(IntradayTrade(
+        symbol=position.symbol,
+        entry_time=position.entry_time,
+        exit_time=exit_result.exit_time,
+        entry_price=position.entry_price,
+        exit_price=exit_result.exit_price,
+        qty=position.qty,
+        pnl=pnl,
+        return_pct=(exit_result.exit_price / position.entry_price) - Decimal("1"),
+        holding_hours=holding_hours,
+        same_day_exit=position.entry_time.date() == exit_result.exit_time.date(),
+        exit_reason=exit_result.reason,
+    ))
+    return equity
+
+
 def build_daily_trend_cache(
     settings: IntradaySettings,
     daily_bars_by_symbol: dict[str, list[dict[str, Any]]],
     intraday_bars_by_symbol: dict[str, list[dict[str, Any]]],
 ) -> DailyTrendCache:
     trading_dates = sorted({
-        parse_bar_time(bar).date()
+        dt
         for bars in intraday_bars_by_symbol.values()
         for bar in bars
-        if settings.start <= parse_bar_time(bar).date() <= settings.end
+        if settings.start <= (dt := parse_bar_time(bar).date()) <= settings.end
     })
     symbols = sorted(set(settings.watchlist + [settings.market_symbol]))
     return {
@@ -325,7 +365,11 @@ def run_backtest(
     intraday_bars_by_symbol: dict[str, list[dict[str, Any]]],
     daily_trend_cache: DailyTrendCache | None = None,
 ) -> dict[str, Any]:
-    market_daily = daily_bars_by_symbol[settings.market_symbol]
+    if settings.market_symbol not in daily_bars_by_symbol:
+        raise ValueError(f"market_symbol {settings.market_symbol!r} not found in daily_bars_by_symbol")
+    resolved_cache = daily_trend_cache if daily_trend_cache is not None else build_daily_trend_cache(
+        settings, daily_bars_by_symbol, intraday_bars_by_symbol
+    )
     time_index_by_symbol = {
         symbol: {parse_bar_time(bar): i for i, bar in enumerate(bars)}
         for symbol, bars in intraday_bars_by_symbol.items()
@@ -338,79 +382,85 @@ def run_backtest(
         symbol: [d(bar["h"]) for bar in bars]
         for symbol, bars in intraday_bars_by_symbol.items()
     }
-    timeline = sorted({
+    all_times = sorted({
         ts
         for index in time_index_by_symbol.values()
         for ts in index
-        if settings.start <= ts.date() <= settings.end
+        if settings.start <= ts.date()
     })
+    if settings.end_mode == "window":
+        timeline = [ts for ts in all_times if ts.date() <= settings.end]
+    else:
+        timeline = all_times
 
     equity = settings.initial_equity
     peak_equity = equity
     max_drawdown = Decimal("0")
     position: Optional[IntradayPosition] = None
     pending_entry: Optional[IntradaySignal] = None
+    pending_exit: Optional[IntradayExit] = None
     trades: list[IntradayTrade] = []
 
     for current_time in timeline:
+        in_entry_window = settings.start <= current_time.date() <= settings.end
+        if not in_entry_window and position is None and pending_entry is None and pending_exit is None:
+            break
+
+        if position is not None and pending_exit is not None and pending_exit.exit_time <= current_time:
+            equity = close_position(equity, position, pending_exit, trades)
+            position = None
+            pending_exit = None
+            peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
+
         if pending_entry and pending_entry.entry_time == current_time and position is None:
-            qty = calculate_qty(settings, equity, pending_entry)
-            if qty > 0:
-                position = IntradayPosition(
-                    symbol=pending_entry.symbol,
-                    entry_time=pending_entry.entry_time,
-                    entry_price=pending_entry.entry_price,
-                    stop_price=pending_entry.stop_price,
-                    take_profit_price=pending_entry.take_profit_price,
-                    qty=qty,
-                )
+            if settings.start <= pending_entry.entry_time.date() <= settings.end:
+                qty = calculate_qty(settings, equity, pending_entry)
+                if qty > 0:
+                    position = IntradayPosition(
+                        symbol=pending_entry.symbol,
+                        entry_time=pending_entry.entry_time,
+                        entry_price=pending_entry.entry_price,
+                        stop_price=pending_entry.stop_price,
+                        take_profit_price=pending_entry.take_profit_price,
+                        qty=qty,
+                    )
             pending_entry = None
 
-        if position is not None:
+        if position is not None and pending_exit is None:
             bars = intraday_bars_by_symbol[position.symbol]
             index = time_index_by_symbol[position.symbol].get(current_time)
             if index is not None:
                 bar = bars[index]
                 closes = closes_by_symbol[position.symbol]
-                exit_result = exit_for_bar(settings, position, bar, closes, index)
+                exit_result = exit_for_bar(settings, position, bar, bars, closes, index)
                 mark_price = d(bar["l"])
                 if exit_result:
-                    reason, exit_price = exit_result
+                    reason = exit_result.reason
+                    exit_time = exit_result.exit_time
+                    exit_price = exit_result.exit_price
                     if reason == "stop_loss":
                         mark_price = exit_price
                     else:
                         mark_price = min(mark_price, exit_price)
                     marked_equity = equity + ((mark_price - position.entry_price) * position.qty)
                     peak_equity, max_drawdown = update_drawdown(marked_equity, peak_equity, max_drawdown)
-                    pnl = (exit_price - position.entry_price) * position.qty
-                    equity += pnl
-                    holding_hours = Decimal(str((current_time - position.entry_time).total_seconds() / 3600))
-                    trades.append(IntradayTrade(
-                        symbol=position.symbol,
-                        entry_time=position.entry_time,
-                        exit_time=current_time,
-                        entry_price=position.entry_price,
-                        exit_price=exit_price,
-                        qty=position.qty,
-                        pnl=pnl,
-                        return_pct=(exit_price / position.entry_price) - Decimal("1"),
-                        holding_hours=holding_hours,
-                        same_day_exit=position.entry_time.date() == current_time.date(),
-                        exit_reason=reason,
-                    ))
-                    position = None
-                    peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
+                    if exit_time == current_time:
+                        equity = close_position(equity, position, exit_result, trades)
+                        position = None
+                        peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
+                    else:
+                        pending_exit = exit_result
+                        continue
                 else:
                     marked_equity = equity + ((mark_price - position.entry_price) * position.qty)
                     peak_equity, max_drawdown = update_drawdown(marked_equity, peak_equity, max_drawdown)
 
         if position is not None or pending_entry is not None:
             continue
+        if not in_entry_window:
+            continue
 
-        if daily_trend_cache is not None:
-            market_ok, _ = daily_trend_cache.get(settings.market_symbol, {}).get(current_time.date(), (False, Decimal("0")))
-        else:
-            market_ok, _ = daily_trend_pass(settings, market_daily, current_time.date())
+        market_ok, _ = resolved_cache.get(settings.market_symbol, {}).get(current_time.date(), (False, Decimal("0")))
         if not market_ok:
             continue
 
@@ -420,14 +470,7 @@ def run_backtest(
             index = time_index_by_symbol.get(symbol, {}).get(current_time)
             if index is None:
                 continue
-            if daily_trend_cache is not None:
-                symbol_ok, trend_strength = daily_trend_cache.get(symbol, {}).get(current_time.date(), (False, Decimal("0")))
-            else:
-                symbol_ok, trend_strength = daily_trend_pass(
-                    settings,
-                    daily_bars_by_symbol.get(symbol, []),
-                    current_time.date(),
-                )
+            symbol_ok, trend_strength = resolved_cache.get(symbol, {}).get(current_time.date(), (False, Decimal("0")))
             if not symbol_ok:
                 continue
             signal = intraday_signal_for_index(
@@ -440,14 +483,22 @@ def run_backtest(
                 trend_strength,
             )
             if signal is not None:
-                candidates.append(signal)
+                if settings.start <= signal.signal_time.date() <= settings.end and signal.entry_time.date() <= settings.end:
+                    candidates.append(signal)
 
         if candidates:
             pending_entry = max(candidates, key=lambda signal: signal.selection_score)
 
     if position is not None:
         bars = intraday_bars_by_symbol[position.symbol]
-        last_bar = next((bar for bar in reversed(bars) if parse_bar_time(bar).date() <= settings.end), None)
+        last_bar = next(
+            (
+                bar
+                for bar in reversed(bars)
+                if settings.end_mode == "signal_cohort" or parse_bar_time(bar).date() <= settings.end
+            ),
+            None,
+        )
         if last_bar is not None:
             exit_time = parse_bar_time(last_bar)
             exit_price = round_price(d(last_bar["c"]))
@@ -465,7 +516,7 @@ def run_backtest(
                 return_pct=(exit_price / position.entry_price) - Decimal("1"),
                 holding_hours=holding_hours,
                 same_day_exit=position.entry_time.date() == exit_time.date(),
-                exit_reason="end_of_backtest",
+                exit_reason="end_of_data" if settings.end_mode == "signal_cohort" else "end_of_backtest",
             ))
             peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
 
@@ -534,8 +585,10 @@ def build_result(
 
 def fetch_bars(settings: IntradaySettings, client: AlpacaRestClient) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
     daily_start = settings.start - timedelta(days=settings.daily_slow * 3)
-    intraday_start = settings.start - timedelta(days=max(10, settings.intraday_sma * 2))
+    intraday_start = settings.start - timedelta(days=max(10, settings.intraday_sma * 2, settings.breakout_lookback * 2))
     intraday_end = settings.end + timedelta(days=1)
+    if settings.end_mode == "signal_cohort" and settings.end < date.today():
+        intraday_end = date.today()
     symbols = sorted(set(settings.watchlist + [settings.market_symbol]))
     daily = {
         symbol: client.get_historical_stock_bars(symbol, "1Day", daily_start, settings.end)
@@ -576,7 +629,7 @@ def print_report(result: dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Backtest a 1H swing pullback strategy with daily trend filters.")
+    parser = argparse.ArgumentParser(description="Backtest an intraday swing strategy with daily trend filters.")
     parser.add_argument("--start", help="Backtest start date, YYYY-MM-DD.")
     parser.add_argument("--end", help="Backtest end date, YYYY-MM-DD.")
     parser.add_argument("--watchlist", help="Comma-separated symbols. Defaults to WATCHLIST.")
@@ -586,11 +639,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--risk-fraction", help="Risk per trade.")
     parser.add_argument("--reward-risk-ratio", help="Take-profit R multiple.")
     parser.add_argument("--stop-loss-pct", help="Stop distance from entry.")
-    parser.add_argument("--intraday-timeframe", help="Intraday timeframe. Defaults to 1Hour.")
-    parser.add_argument("--daily-fast", help="Daily fast SMA. Defaults to 30.")
+    parser.add_argument("--intraday-timeframe", help="Intraday timeframe. Defaults to 2Hour.")
+    parser.add_argument("--daily-fast", help="Daily fast SMA. Defaults to 20.")
     parser.add_argument("--daily-slow", help="Daily slow SMA. Defaults to 100.")
     parser.add_argument("--intraday-sma", help="Intraday SMA trigger. Defaults to 20.")
-    parser.add_argument("--breakout-lookback", help="Require close above prior N intraday highs; 0 disables.")
+    parser.add_argument("--breakout-lookback", help="Require close above prior N intraday highs; defaults to 5.")
+    parser.add_argument(
+        "--end-mode",
+        choices=["window", "signal-cohort"],
+        help=(
+            "window liquidates trades within the requested backtest window; "
+            "signal-cohort limits entries to the window but lets exits occur after --end."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON result.")
     return parser.parse_args()
 

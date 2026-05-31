@@ -2,7 +2,7 @@
 Alpaca + FMP swing trader guard.
 
 Design goals:
-- GitHub Actions may run every hour, but this script must NOT submit an order every hour.
+- GitHub Actions may run repeatedly, but this script must NOT submit an order every run.
 - At most one account-level position.
 - At most one pending/open order lifecycle.
 - Entry order is a bracket order: entry + take-profit + stop-loss.
@@ -57,12 +57,18 @@ def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
-    return int(raw)
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer value for {name}: {raw.strip()!r}") from exc
 
 
 def env_decimal(name: str, default: str) -> Decimal:
     raw = os.getenv(name, default).strip()
-    return Decimal(raw)
+    try:
+        return Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid decimal value for {name}: {raw!r}") from exc
 
 
 def parse_watchlist(raw: str) -> list[str]:
@@ -85,6 +91,7 @@ class Settings:
     strategy: str
     symbol_selection_method: str
     data_feed: str
+    market_symbol: str
 
     risk_fraction: Decimal
     reward_risk_ratio: Decimal
@@ -99,6 +106,11 @@ class Settings:
     sma_fast: int
     sma_slow: int
     historical_lookback_days: int
+    intraday_timeframe: str
+    daily_fast: int
+    daily_slow: int
+    intraday_sma: int
+    breakout_lookback: int
 
     log_level: str
 
@@ -117,13 +129,14 @@ def load_settings() -> Settings:
         fmp_api_key=env_str("FMP_API_KEY"),
         paper=env_bool("PAPER", True),
         enable_trading=env_bool("ENABLE_TRADING", False),
-        watchlist=parse_watchlist(env_str("WATCHLIST", "SPY")),
+        watchlist=parse_watchlist(env_str("WATCHLIST", "QQQ,SMH,NVDA,AVGO,AMD,MU,MSFT,GOOGL,META,AMZN,ORCL,SPY")),
         strategy=env_str("STRATEGY", "disabled").lower(),
         symbol_selection_method=env_str("SYMBOL_SELECTION_METHOD", "best_signal").lower(),
         data_feed=env_str("DATA_FEED", "iex").lower(),
-        risk_fraction=env_decimal("RISK_FRACTION", "0.01"),
-        reward_risk_ratio=env_decimal("REWARD_RISK_RATIO", "2.0"),
-        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.05"),
+        market_symbol=env_str("MARKET_SYMBOL", "QQQ").upper(),
+        risk_fraction=env_decimal("RISK_FRACTION", "0.001"),
+        reward_risk_ratio=env_decimal("REWARD_RISK_RATIO", "3.0"),
+        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.03"),
         allow_fractional=env_bool("ALLOW_FRACTIONAL", False),
         max_position_count=env_int("MAX_POSITION_COUNT", 1),
         earnings_block_days_before=env_int("EARNINGS_BLOCK_DAYS_BEFORE", 1),
@@ -132,6 +145,11 @@ def load_settings() -> Settings:
         sma_fast=env_int("SMA_FAST", 20),
         sma_slow=env_int("SMA_SLOW", 50),
         historical_lookback_days=env_int("HISTORICAL_LOOKBACK_DAYS", 180),
+        intraday_timeframe=env_str("INTRADAY_TIMEFRAME", "2Hour"),
+        daily_fast=env_int("DAILY_FAST", 20),
+        daily_slow=env_int("DAILY_SLOW", 100),
+        intraday_sma=env_int("INTRADAY_SMA", 20),
+        breakout_lookback=env_int("BREAKOUT_LOOKBACK", 5),
         log_level=env_str("LOG_LEVEL", "INFO").upper(),
     )
 
@@ -145,8 +163,8 @@ def load_settings() -> Settings:
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-    if s.strategy not in {"disabled", "manual_once", "sma_trend"}:
-        raise ValueError("STRATEGY must be one of: disabled, manual_once, sma_trend")
+    if s.strategy not in {"disabled", "manual_once", "sma_trend", "intraday_swing"}:
+        raise ValueError("STRATEGY must be one of: disabled, manual_once, sma_trend, intraday_swing")
     if s.symbol_selection_method not in {"best_signal", "first_signal"}:
         raise ValueError("SYMBOL_SELECTION_METHOD must be one of: best_signal, first_signal")
     if s.risk_fraction <= 0 or s.risk_fraction > Decimal("0.10"):
@@ -155,8 +173,18 @@ def load_settings() -> Settings:
         raise ValueError("REWARD_RISK_RATIO must be > 0")
     if s.stop_loss_pct <= 0 or s.stop_loss_pct >= Decimal("0.50"):
         raise ValueError("STOP_LOSS_PCT must be > 0 and < 0.50")
-    if s.sma_fast <= 1 or s.sma_slow <= 1 or s.sma_fast >= s.sma_slow:
-        raise ValueError("SMA_FAST must be > 1 and < SMA_SLOW")
+    if s.strategy == "sma_trend":
+        if s.sma_fast <= 1 or s.sma_slow <= 1 or s.sma_fast >= s.sma_slow:
+            raise ValueError("SMA_FAST must be > 1 and < SMA_SLOW")
+    if s.strategy == "intraday_swing":
+        if s.daily_fast <= 1 or s.daily_slow <= 1 or s.daily_fast >= s.daily_slow:
+            raise ValueError("DAILY_FAST must be > 1 and < DAILY_SLOW")
+        if s.intraday_sma <= 1:
+            raise ValueError("INTRADAY_SMA must be > 1")
+        if s.breakout_lookback < 0:
+            raise ValueError("BREAKOUT_LOOKBACK must be >= 0")
+        if not (s.intraday_timeframe.endswith("Min") or s.intraday_timeframe.endswith("Hour")):
+            raise ValueError("INTRADAY_TIMEFRAME must be a Min or Hour timeframe (e.g. '30Min', '2Hour')")
     if s.max_position_count != 1:
         raise ValueError("This version intentionally supports MAX_POSITION_COUNT=1 only")
 
@@ -226,6 +254,8 @@ class AlpacaRestClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.session = requests.Session()
+        self._historical_bars_cache: dict[tuple[str, str, date, date], list[dict[str, Any]]] = {}
+        self._daily_trend_cache: dict[tuple[str, date, int, int], tuple[bool, Decimal, dict[str, Any]]] = {}
         self.session.headers.update({
             "APCA-API-KEY-ID": settings.alpaca_api_key,
             "APCA-API-SECRET-KEY": settings.alpaca_secret_key,
@@ -278,6 +308,10 @@ class AlpacaRestClient:
         return self._request("POST", self.settings.trading_base, "/v2/orders", json_body=order_payload) or {}
 
     def get_historical_stock_bars(self, symbol: str, timeframe: str, start: date, end: date) -> list[dict[str, Any]]:
+        cache_key = (symbol, timeframe, start, end)
+        if cache_key in self._historical_bars_cache:
+            return list(self._historical_bars_cache[cache_key])
+
         bars: list[dict[str, Any]] = []
         page_token: Optional[str] = None
 
@@ -296,7 +330,10 @@ class AlpacaRestClient:
 
             data = self._request("GET", DATA_BASE, "/v2/stocks/bars", params=params)
             if data is None:
-                return bars
+                raise RuntimeError(
+                    f"Alpaca bars API returned empty response mid-pagination for {symbol} "
+                    f"({len(bars)} bars fetched before failure)"
+                )
 
             bars_by_symbol = data.get("bars", {})
             if isinstance(bars_by_symbol, dict):
@@ -304,10 +341,24 @@ class AlpacaRestClient:
 
             page_token = data.get("next_page_token")
             if not page_token:
+                self._historical_bars_cache[cache_key] = list(bars)
                 return bars
 
     def get_historical_daily_bars(self, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
         return self.get_historical_stock_bars(symbol, "1Day", start, end)
+
+    def get_cached_daily_trend(
+        self,
+        symbol: str,
+        bars: list[dict[str, Any]],
+        as_of: date,
+        fast_period: int,
+        slow_period: int,
+    ) -> tuple[bool, Decimal, dict[str, Any]]:
+        key = (symbol, as_of, fast_period, slow_period)
+        if key not in self._daily_trend_cache:
+            self._daily_trend_cache[key] = daily_trend_pass(bars, as_of, fast_period, slow_period)
+        return self._daily_trend_cache[key]
 
     def get_latest_quote(self, symbol: str) -> Optional[dict[str, Any]]:
         data = self._request(
@@ -436,6 +487,10 @@ def earnings_events_to_blackouts(
     after_days: int,
 ) -> list[BlockReason]:
     if ZoneInfo is None:
+        logging.warning(
+            "zoneinfo unavailable; earnings blackout windows computed in UTC, "
+            "which may be up to 5 hours off from America/New_York boundaries"
+        )
         ny_tz = timezone.utc
     else:
         ny_tz = ZoneInfo("America/New_York")
@@ -507,6 +562,66 @@ def compute_sma(values: list[Decimal], period: int) -> Decimal:
     return sum(values[-period:]) / Decimal(period)
 
 
+def parse_bar_time(bar: dict[str, Any]) -> datetime:
+    raw = str(bar.get("t", ""))
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def parse_timeframe_delta(timeframe: str) -> timedelta:
+    raw = timeframe.strip()
+    if raw.endswith("Min"):
+        return timedelta(minutes=int(raw[:-3]))
+    if raw.endswith("Hour"):
+        return timedelta(hours=int(raw[:-4]))
+    if raw.endswith("Day"):
+        return timedelta(days=int(raw[:-3]))
+    raise ValueError(f"Unsupported intraday timeframe: {timeframe}")
+
+
+def confirmed_intraday_bars(bars: list[dict[str, Any]], timeframe: str, current_time: datetime) -> list[dict[str, Any]]:
+    duration = parse_timeframe_delta(timeframe)
+    return [
+        bar
+        for bar in bars
+        if parse_bar_time(bar) + duration <= current_time
+    ]
+
+
+def daily_trend_pass(
+    bars: list[dict[str, Any]],
+    as_of: date,
+    fast_period: int,
+    slow_period: int,
+) -> tuple[bool, Decimal, dict[str, Any]]:
+    confirmed = [
+        bar
+        for bar in bars
+        if parse_bar_time(bar).date() < as_of
+    ]
+    if len(confirmed) < slow_period:
+        return False, Decimal("0"), {"confirmed_daily_bars": len(confirmed), "need": slow_period}
+
+    closes = [d(bar["c"]) for bar in confirmed]
+    fast = compute_sma(closes, fast_period)
+    slow = compute_sma(closes, slow_period)
+    latest_close = closes[-1]
+    trend_strength = (fast / slow) - Decimal("1")
+    ok = fast > slow and latest_close > fast
+    return ok, trend_strength, {
+        "confirmed_daily_bars": len(confirmed),
+        "latest_daily_close": latest_close,
+        "daily_fast": fast,
+        "daily_slow": slow,
+        "trend_strength": trend_strength,
+        "daily_trend_ok": ok,
+    }
+
+
 def get_mid_or_last_price(client: AlpacaRestClient, symbol: str) -> Decimal:
     quote = client.get_latest_quote(symbol)
     if quote:
@@ -533,6 +648,125 @@ def get_mid_or_last_price(client: AlpacaRestClient, symbol: str) -> Decimal:
     raise RuntimeError(f"Cannot obtain latest price for {symbol}")
 
 
+def build_intraday_swing_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> Optional[TradeSignal]:
+    current_time = now_utc()
+    daily_start = current_time.date() - timedelta(days=settings.daily_slow * 3)
+    intraday_start = current_time.date() - timedelta(days=max(10, settings.intraday_sma * 2, settings.breakout_lookback * 2))
+
+    market_daily = client.get_historical_daily_bars(settings.market_symbol, daily_start, current_time.date())
+    market_ok, market_trend_strength, market_details = client.get_cached_daily_trend(
+        settings.market_symbol,
+        market_daily,
+        current_time.date(),
+        settings.daily_fast,
+        settings.daily_slow,
+    )
+    if not market_ok:
+        json_log("INTRADAY_MARKET_FILTER", {"symbol": symbol, "market_symbol": settings.market_symbol, **market_details})
+        return None
+
+    if symbol == settings.market_symbol:
+        symbol_ok, trend_strength, symbol_details = market_ok, market_trend_strength, market_details
+    else:
+        symbol_daily = client.get_historical_daily_bars(symbol, daily_start, current_time.date())
+        symbol_ok, trend_strength, symbol_details = client.get_cached_daily_trend(
+            symbol,
+            symbol_daily,
+            current_time.date(),
+            settings.daily_fast,
+            settings.daily_slow,
+        )
+    if not symbol_ok:
+        json_log("INTRADAY_DAILY_FILTER", {"symbol": symbol, **symbol_details})
+        return None
+
+    raw_intraday = client.get_historical_stock_bars(
+        symbol,
+        settings.intraday_timeframe,
+        intraday_start,
+        current_time.date() + timedelta(days=1),
+    )
+    bars = confirmed_intraday_bars(raw_intraday, settings.intraday_timeframe, current_time)
+    min_bars = max(settings.intraday_sma + 1, settings.breakout_lookback + 1)
+    if len(bars) < min_bars:
+        logging.info("NO_SIGNAL not enough intraday bars for %s: got=%s need=%s", symbol, len(bars), min_bars)
+        return None
+
+    closes = [d(bar["c"]) for bar in bars]
+    highs = [d(bar["h"]) for bar in bars]
+    latest_close = closes[-1]
+    prev_close = closes[-2]
+    latest_sma = compute_sma(closes, settings.intraday_sma)
+    prev_sma = compute_sma(closes[:-1], settings.intraday_sma)
+
+    crossed_up = latest_close > latest_sma and prev_close <= prev_sma
+    breakout_ok = True
+    prior_high: Decimal | None = None
+    if settings.breakout_lookback > 0:
+        prior_high = max(highs[-settings.breakout_lookback - 1:-1])
+        breakout_ok = latest_close > prior_high
+
+    breakout_strength = (latest_close / latest_sma) - Decimal("1")
+    selection_score = trend_strength + breakout_strength
+
+    if not crossed_up or not breakout_ok:
+        logging.info(
+            "NO_SIGNAL intraday_swing for %s: crossed_up=%s breakout_ok=%s",
+            symbol, crossed_up, breakout_ok,
+        )
+        return None
+
+    json_log("INTRADAY_STATUS", {
+        "symbol": symbol,
+        "market_symbol": settings.market_symbol,
+        "timeframe": settings.intraday_timeframe,
+        "latest_bar_time": parse_bar_time(bars[-1]),
+        "latest_close": latest_close,
+        "prev_close": prev_close,
+        "latest_intraday_sma": latest_sma,
+        "prev_intraday_sma": prev_sma,
+        "crossed_up": crossed_up,
+        "breakout_lookback": settings.breakout_lookback,
+        "prior_high": prior_high,
+        "breakout_ok": breakout_ok,
+        "trend_strength": trend_strength,
+        "breakout_strength": breakout_strength,
+        "selection_score": selection_score,
+        **symbol_details,
+    })
+
+    ref = get_mid_or_last_price(client, symbol)
+    stop = round_price(ref * (Decimal("1") - settings.stop_loss_pct))
+    take = round_price(ref + (ref - stop) * settings.reward_risk_ratio)
+    return TradeSignal(
+        symbol=symbol,
+        side="buy",
+        reason=(
+            f"intraday_swing {settings.intraday_timeframe} "
+            f"daily={settings.daily_fast}/{settings.daily_slow} "
+            f"intraday_sma={settings.intraday_sma} breakout={settings.breakout_lookback}"
+        ),
+        reference_price=round_price(ref),
+        stop_price=stop,
+        take_profit_price=take,
+        selection_score=selection_score,
+        selection_details={
+            "strategy": "intraday_swing",
+            "market_symbol": settings.market_symbol,
+            "intraday_timeframe": settings.intraday_timeframe,
+            "daily_fast": settings.daily_fast,
+            "daily_slow": settings.daily_slow,
+            "intraday_sma": settings.intraday_sma,
+            "breakout_lookback": settings.breakout_lookback,
+            "latest_close": latest_close,
+            "latest_intraday_sma": latest_sma,
+            "prior_high": prior_high,
+            "trend_strength": trend_strength,
+            "breakout_strength": breakout_strength,
+        },
+    )
+
+
 def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> Optional[TradeSignal]:
     strategy = settings.strategy
 
@@ -555,7 +789,7 @@ def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> O
         )
 
     if strategy == "sma_trend":
-        end = now_utc().date()
+        end = now_utc().date() - timedelta(days=1)  # use yesterday's confirmed close; today's bar is partial while market is open
         start = end - timedelta(days=settings.historical_lookback_days)
         bars = client.get_historical_daily_bars(symbol, start, end)
         if len(bars) < settings.sma_slow + 2:
@@ -614,6 +848,9 @@ def build_signal(settings: Settings, client: AlpacaRestClient, symbol: str) -> O
                 "breakout_strength": breakout_strength,
             },
         )
+
+    if strategy == "intraday_swing":
+        return build_intraday_swing_signal(settings, client, symbol)
 
     raise ValueError(f"Unsupported strategy: {strategy}")
 
@@ -674,6 +911,49 @@ def build_exit_signal(settings: Settings, client: AlpacaRestClient, symbol: str)
             if price_below_slow:
                 reasons.append(f"close({latest_close}) < slow_sma({settings.sma_slow})({latest_slow})")
             return ExitSignal(symbol=symbol, reason=" AND ".join(reasons))
+
+        return None
+
+    if strategy == "intraday_swing":
+        current_time = now_utc()
+        intraday_start = current_time.date() - timedelta(days=max(10, settings.intraday_sma * 2, settings.breakout_lookback * 2))
+        raw_intraday = client.get_historical_stock_bars(
+            symbol,
+            settings.intraday_timeframe,
+            intraday_start,
+            current_time.date() + timedelta(days=1),
+        )
+        bars = confirmed_intraday_bars(raw_intraday, settings.intraday_timeframe, current_time)
+        if len(bars) < settings.intraday_sma:
+            logging.info(
+                "NO_EXIT_SIGNAL not enough intraday bars for %s: got=%s need=%s",
+                symbol,
+                len(bars),
+                settings.intraday_sma,
+            )
+            return None
+
+        closes = [d(bar["c"]) for bar in bars]
+        latest_close = closes[-1]
+        latest_sma = compute_sma(closes, settings.intraday_sma)
+        below_sma = latest_close < latest_sma
+        json_log("INTRADAY_EXIT_STATUS", {
+            "symbol": symbol,
+            "timeframe": settings.intraday_timeframe,
+            "latest_bar_time": parse_bar_time(bars[-1]),
+            "latest_close": latest_close,
+            "latest_intraday_sma": latest_sma,
+            "below_sma": below_sma,
+        })
+
+        if below_sma:
+            return ExitSignal(
+                symbol=symbol,
+                reason=(
+                    f"{settings.intraday_timeframe} close({latest_close}) "
+                    f"< intraday_sma({settings.intraday_sma})({latest_sma})"
+                ),
+            )
 
         return None
 
@@ -747,6 +1027,20 @@ def select_trade_signal(
     })
 
     candidates: list[TradeSignal] = []
+
+    if settings.strategy == "intraday_swing":
+        daily_start = current_time.date() - timedelta(days=settings.daily_slow * 3)
+        market_daily = client.get_historical_daily_bars(settings.market_symbol, daily_start, current_time.date())
+        market_ok, _, market_details = client.get_cached_daily_trend(
+            settings.market_symbol,
+            market_daily,
+            current_time.date(),
+            settings.daily_fast,
+            settings.daily_slow,
+        )
+        if not market_ok:
+            json_log("INTRADAY_MARKET_FILTER", {"market_symbol": settings.market_symbol, **market_details})
+            return None
 
     for symbol in settings.watchlist:
         if not ensure_asset_tradeable(client, symbol):
@@ -843,6 +1137,13 @@ def run() -> int:
         settings.watchlist,
         settings.data_feed,
     )
+    if settings.enable_trading:
+        logging.warning(
+            "LIVE TRADING ENABLED: real orders will be submitted (strategy=%s, paper=%s). "
+            "Set ENABLE_TRADING=false to dry-run without submitting orders.",
+            settings.strategy,
+            settings.paper,
+        )
 
     alpaca = AlpacaRestClient(settings)
     fmp = FmpClient(settings)
