@@ -3,8 +3,10 @@
 import os
 import requests
 
+from utils import env_bool
 
-BASE_URL = "https://paper-api.alpaca.markets/v2"
+PAPER: bool = env_bool("PAPER", True)
+BASE_URL = ("https://paper-api.alpaca.markets" if PAPER else "https://api.alpaca.markets") + "/v2"
 
 
 def alpaca_get(path: str, params: dict | None = None):

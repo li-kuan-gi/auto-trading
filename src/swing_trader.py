@@ -25,6 +25,8 @@ from typing import Any, Iterable, Optional
 
 import requests
 
+from utils import env_bool
+
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover
@@ -45,12 +47,6 @@ FMP_BASE = "https://financialmodelingprep.com/stable"
 def env_str(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
-
-def env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def env_int(name: str, default: int) -> int:
