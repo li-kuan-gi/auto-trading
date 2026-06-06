@@ -988,7 +988,7 @@ def build_bracket_order(settings: Settings, account: dict[str, Any], signal: Tra
         "qty": str(qty.normalize()) if settings.allow_fractional else str(int(qty)),
         "side": signal.side,
         "type": "market",
-        "time_in_force": "day",
+        "time_in_force": "gtc",
         "order_class": "bracket",
         "take_profit": {"limit_price": decimal_to_str(signal.take_profit_price)},
         "stop_loss": {"stop_price": decimal_to_str(signal.stop_price)},
