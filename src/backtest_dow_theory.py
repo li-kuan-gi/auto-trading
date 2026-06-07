@@ -294,10 +294,10 @@ def run_backtest_on_bars(
             (i for i, b in enumerate(bars) if bar_date(b) >= settings.start),
             len(bars),
         )
-        for i in range(warmup_end):
+        # Extend n bars past warmup_end so pivots whose right-bracket reaches
+        # into the main period are also confirmed before signal scanning starts.
+        for i in range(min(warmup_end + n, len(bars))):
             confirm_idx = i - n
-            if confirm_idx < n:
-                continue
             shs = swing_highs_by_symbol[symbol]
             sls = swing_lows_by_symbol[symbol]
             if is_swing_high(bars, confirm_idx, n) and (not shs or shs[-1] != confirm_idx):
@@ -352,15 +352,8 @@ def run_backtest_on_bars(
             if is_swing_low(bars, confirm_idx, n) and (not sls or sls[-1] != confirm_idx):
                 sls.append(confirm_idx)
 
-        # Trail the swing low support for the open position
-        if position is not None:
-            sls = swing_lows_by_symbol.get(position.symbol, [])
-            if sls:
-                latest_sl = d(bars_by_symbol[position.symbol][sls[-1]]["l"])
-                if latest_sl > position.last_swing_low:
-                    position.last_swing_low = latest_sl
-
-        # Check exit for current position
+        # Check exit for current position (before trailing stop update so that
+        # a newly confirmed swing low takes effect on the *next* bar, not this one)
         if position is not None and pending_exit is None:
             bars = bars_by_symbol[position.symbol]
             idx = date_index_by_symbol[position.symbol].get(current_date)
@@ -386,6 +379,15 @@ def run_backtest_on_bars(
                 else:
                     marked_equity = mark_position_equity(equity, position, d(bar["l"]))
                     peak_equity, max_drawdown = update_drawdown(marked_equity, peak_equity, max_drawdown)
+
+        # Trail the swing low: apply newly confirmed pivot as stop for the *next* bar onward.
+        # Runs after exit check so the same bar's close is evaluated against the old stop.
+        if position is not None and pending_exit is None:
+            sls = swing_lows_by_symbol.get(position.symbol, [])
+            if sls:
+                latest_sl = d(bars_by_symbol[position.symbol][sls[-1]]["l"])
+                if latest_sl > position.last_swing_low:
+                    position.last_swing_low = latest_sl
 
         if position is not None or pending_entry is not None:
             continue
@@ -416,19 +418,11 @@ def run_backtest_on_bars(
         last_bar = next((bar for bar in reversed(bars) if bar_date(bar) <= settings.end), None)
         if last_bar is not None:
             exit_price = round_price(d(last_bar["c"]))
-            pnl = (exit_price - position.entry_price) * position.qty
-            equity += pnl
-            trades.append(TradeResult(
-                symbol=position.symbol,
-                entry_date=position.entry_date,
-                exit_date=bar_date(last_bar),
-                entry_price=position.entry_price,
-                exit_price=exit_price,
-                qty=position.qty,
-                pnl=pnl,
-                return_pct=(exit_price / position.entry_price) - Decimal("1"),
-                exit_reason="end_of_backtest",
-            ))
+            equity = close_position(
+                equity, position,
+                ExitResult("end_of_backtest", bar_date(last_bar), exit_price),
+                trades,
+            )
             peak_equity, max_drawdown = update_drawdown(equity, peak_equity, max_drawdown)
 
     wins = [t for t in trades if t.pnl > 0]

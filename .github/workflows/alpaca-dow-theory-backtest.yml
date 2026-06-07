@@ -23,6 +23,10 @@ on:
         description: "Bars on each side to confirm a swing point"
         required: true
         default: "2"
+      risk_fraction:
+        description: "Risk per trade as fraction of equity (e.g. 0.02 = 2%)"
+        required: true
+        default: "0.02"
       output_json:
         description: "Print full JSON result"
         required: true
@@ -58,7 +62,6 @@ jobs:
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
           PAPER: ${{ vars.PAPER || 'true' }}
           DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
-          RISK_FRACTION: ${{ vars.RISK_FRACTION || '0.01' }}
           REWARD_RISK_RATIO: ${{ vars.REWARD_RISK_RATIO || '2.0' }}
           STOP_LOSS_PCT: ${{ vars.STOP_LOSS_PCT || '0.05' }}
           ALLOW_FRACTIONAL: ${{ vars.ALLOW_FRACTIONAL || 'false' }}
@@ -68,6 +71,7 @@ jobs:
           BACKTEST_WATCHLIST: ${{ inputs.watchlist }}
           BACKTEST_INITIAL_EQUITY: ${{ inputs.initial_equity }}
           BACKTEST_SWING_N: ${{ inputs.swing_n }}
+          BACKTEST_RISK_FRACTION: ${{ inputs.risk_fraction }}
           BACKTEST_OUTPUT_JSON: ${{ inputs.output_json }}
         run: |
           args=(
@@ -76,6 +80,7 @@ jobs:
             --watchlist "$BACKTEST_WATCHLIST"
             --initial-equity "$BACKTEST_INITIAL_EQUITY"
             --swing-n "$BACKTEST_SWING_N"
+            --risk-fraction "$BACKTEST_RISK_FRACTION"
           )
           if [ "$BACKTEST_OUTPUT_JSON" = "true" ]; then
             args+=(--json)
