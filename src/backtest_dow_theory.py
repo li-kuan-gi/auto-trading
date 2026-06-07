@@ -286,6 +286,25 @@ def run_backtest_on_bars(
     swing_highs_by_symbol: dict[str, list[int]] = {s: [] for s in bars_by_symbol}
     swing_lows_by_symbol: dict[str, list[int]] = {s: [] for s in bars_by_symbol}
 
+    # Pre-confirm swings from warmup bars (before settings.start).
+    # The main loop only iterates over timeline dates, so warmup-period pivots
+    # would never be confirmed without this pass.
+    for symbol, bars in bars_by_symbol.items():
+        warmup_end = next(
+            (i for i, b in enumerate(bars) if bar_date(b) >= settings.start),
+            len(bars),
+        )
+        for i in range(warmup_end):
+            confirm_idx = i - n
+            if confirm_idx < n:
+                continue
+            shs = swing_highs_by_symbol[symbol]
+            sls = swing_lows_by_symbol[symbol]
+            if is_swing_high(bars, confirm_idx, n) and (not shs or shs[-1] != confirm_idx):
+                shs.append(confirm_idx)
+            if is_swing_low(bars, confirm_idx, n) and (not sls or sls[-1] != confirm_idx):
+                sls.append(confirm_idx)
+
     equity = settings.initial_equity
     peak_equity = equity
     max_drawdown = Decimal("0")
